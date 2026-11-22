@@ -17,11 +17,11 @@
 
 ## Updating from 1.0
 
-Close the game and the launcher, then unzip `NieR-PC-update-1.1.zip` over your game folder (the one
-with `NieR.exe`) and say yes to replacing files. Your saves and settings stay. The first start makes a
-backup of your save by itself, since the server version changed.
+Close the game and the launcher, then unzip `NieR-Reincarnation-PC-v1.1.zip` over your game folder
+(the one with `NieR.exe`) and say yes to replacing files. Your saves, settings and game files stay. The
+first start makes a backup of your save by itself, since the server version changed.
 
-New here? Grab `NieR-Reincarnation-PC-v1.1.zip` instead and check the README.
+New here? Same zip, unzip it anywhere and check the README.
 
 ## Heads up
 
