@@ -325,15 +325,6 @@ func checkSpace(stage string, remaining int64, opt extractOptions) error {
 	return nil
 }
 
-// dupFile wraps a duplicate of fd, so closing it leaves the caller's open.
-func dupFile(fd int, name string) (*os.File, error) {
-	dup, e := dupFD(fd)
-	if e != nil {
-		return nil, e
-	}
-	return os.NewFile(uintptr(dup), name), nil
-}
-
 // ImportProgress reports bytes ("done", "total") and files ("files",
 // "totalFiles") for the running import, and for a link the bytes downloaded
 // ("downloaded").

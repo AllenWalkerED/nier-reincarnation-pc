@@ -3,6 +3,7 @@ package missions
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"lunar-tear/server/internal/masterdata"
@@ -201,10 +202,96 @@ func TestRegionalMasterDefinitions(t *testing.T) {
 					}
 				}
 			} else {
-				if m.Rule.Kind != "weapon_level" || len(cat.ruleChanges) != 0 {
-					t.Fatalf("Global rule: %+v, %d unexpected revisions", m.Rule, len(cat.ruleChanges))
+				// Only the hand-written rules (rules_extra.json) differ from rules.json.
+				var extra []Rule
+				if err := json.Unmarshal(extraRulesJSON, &extra); err != nil {
+					t.Fatal(err)
+				}
+				hand := map[int32]bool{}
+				for _, r := range extra {
+					hand[r.MissionId] = true
+				}
+				for id := range cat.ruleChanges {
+					if !hand[id] {
+						t.Errorf("Global rule %d has an unexpected revision", id)
+					}
+				}
+				if m.Rule.Kind != "weapon_level" {
+					t.Fatalf("Global rule: %+v", m.Rule)
 				}
 			}
 		})
+	}
+}
+
+// The hand-written rules (rules_extra.json) bind to their missions as the
+// master data defines them, and their summons run over the missions' terms.
+func TestExtraRules(t *testing.T) {
+	master := os.Getenv("BUNKER_TEST_MASTER")
+	if master == "" {
+		t.Skip("BUNKER_TEST_MASTER not set")
+	}
+	if err := memorydb.Init(master); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var extra []Rule
+	if err := json.Unmarshal(extraRulesJSON, &extra); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[int32]bool{}
+	for _, r := range extra {
+		ids[r.MissionId] = true
+		m := cat.ById[r.MissionId]
+		if m == nil {
+			t.Errorf("rule %d: no such mission", r.MissionId)
+			continue
+		}
+		if m.Rule.Kind == "" || m.Rule.Condition != condition(m.EntityMMission) {
+			t.Errorf("rule %d does not bind (mission condition %v, rule %v)", r.MissionId, condition(m.EntityMMission), r.Condition)
+		}
+	}
+	for _, id := range []int32{210030, 210031, 210032, 210033, 210034, 210035, 210036, 210037,
+		210054, 210055, 210056, 210057, 26101, 26102, 26103, 26104, 26105, 27101, 900925} {
+		if !ids[id] {
+			t.Errorf("mission %d has no extra rule", id)
+		}
+	}
+	entries, _, err := masterdata.LoadGachaCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range extra {
+		m := cat.ById[r.MissionId]
+		for _, g := range r.Gachas {
+			found := false
+			for _, e := range entries {
+				if e.GachaId == g {
+					found = true
+					if e.StartDatetime > m.Start || e.EndDatetime < m.End-1000 {
+						t.Errorf("rule %d: summon %d runs %d-%d, mission %d-%d", r.MissionId, g, e.StartDatetime, e.EndDatetime, m.Start, m.End)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("rule %d: no summon %d", r.MissionId, g)
+			}
+		}
+	}
+}
+
+// A rule without summon ids hashes as it did before the field existed, so
+// saved rule revisions stay valid and no progress is reset.
+func TestRuleRevisionUnchangedWithoutSummonIds(t *testing.T) {
+	r := Rule{MissionId: 1, Kind: "gacha_draw", Gacha: "chapter"}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"gi"`) {
+		t.Fatalf("rule without summon ids encodes gi: %s", b)
 	}
 }

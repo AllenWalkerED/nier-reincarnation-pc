@@ -14,6 +14,7 @@ func (s *SQLiteStore) LoadUser(userId int64) (store.UserState, error) {
 	u, err := s.loadStored(userId)
 	if err == nil {
 		store.UpgradeTimeKeys(&u, gametime.NowMillis())
+		store.LinkQuests(&u) // Bunker: earlier event runs' quest copies (store/bunker_quest_links.go)
 	}
 	return u, err
 }

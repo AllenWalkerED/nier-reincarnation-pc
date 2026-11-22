@@ -542,6 +542,12 @@ func TestPlayHistory(t *testing.T) {
 	if got := cat.HistoryValue(&u, HistoryWalkDistance); got != walk+120 {
 		t.Errorf("walk distance %d -> %d", walk, got)
 	}
+	// Counts the save already has stay; each request adds to them.
+	before := map[int32]int64{}
+	for _, h := range []int32{HistoryWeaponSkill, HistoryItemShopPurchases, HistoryExchangeTrades, HistoryExploreGroup1} {
+		before[h] = cat.HistoryValue(&u, h)
+	}
+	added := func(h int32) int64 { return cat.HistoryValue(&u, h) - before[h] }
 	track("/apb.api.weapon.WeaponService/EnhanceSkill", &pb.EnhanceSkillRequest{})
 	var itemShop int32
 	for id, g := range cat.shopGroups {
@@ -551,8 +557,8 @@ func TestPlayHistory(t *testing.T) {
 	}
 	track("/apb.api.shop.ShopService/Buy", &pb.BuyRequest{ShopId: itemShop})
 	track("/apb.api.explore.ExploreService/FinishExplore", &pb.FinishExploreRequest{ExploreId: 11})
-	if cat.HistoryValue(&u, HistoryWeaponSkill) != 1 || cat.HistoryValue(&u, HistoryItemShopPurchases) != 1 ||
-		cat.HistoryValue(&u, HistoryExchangeTrades) != 0 || cat.HistoryValue(&u, HistoryExploreGroup1) < 1 {
+	if added(HistoryWeaponSkill) != 1 || added(HistoryItemShopPurchases) != 1 ||
+		added(HistoryExchangeTrades) != 0 || added(HistoryExploreGroup1) != 1 {
 		t.Errorf("counted: %v", u.Ext.History)
 	}
 	items := cat.PlayHistory(&u)
@@ -564,5 +570,19 @@ func TestPlayHistory(t *testing.T) {
 	}
 	for _, it := range items {
 		t.Logf("history %d: %d", it.HistoryItemId, it.Count)
+	}
+}
+
+// A summon mission naming summons counts draws on those summons only.
+func TestGachaDrawBySummonId(t *testing.T) {
+	cat := &Catalog{}
+	m := &Mission{Rule: Rule{Kind: "gacha_draw", Gachas: []int32{552001}}}
+	c := &counts{gacha: map[string]int64{"": 15}, banners: map[int32]int64{552001: 10, 9: 5}}
+	if n := cat.amountFor(m, c); n != 10 {
+		t.Errorf("draws on 552001 count %d, want 10", n)
+	}
+	other := &counts{gacha: map[string]int64{"": 5}, banners: map[int32]int64{9: 5}}
+	if n := cat.amountFor(m, other); n != 0 {
+		t.Errorf("draws on another summon count %d, want 0", n)
 	}
 }

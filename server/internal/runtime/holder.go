@@ -85,6 +85,12 @@ func (h *Holder) Reload() error {
 		return fmt.Errorf("buildCatalogs: %w", err)
 	}
 	h.cur.Store(c)
+	// Bunker: earlier event runs' quest copies share their originals' progress (store.LinkQuests).
+	questIds := make([]int32, 0, len(c.Quest.QuestById))
+	for id := range c.Quest.QuestById {
+		questIds = append(questIds, id)
+	}
+	store.SetQuestCopies(questIds)
 	now := time.Now()
 	if err := os.Chtimes(h.binPath, now, now); err != nil {
 		log.Printf("[runtime] os.Chtimes(%s) failed (clients may not invalidate cache): %v", h.binPath, err)

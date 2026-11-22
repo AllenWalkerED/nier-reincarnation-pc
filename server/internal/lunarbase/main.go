@@ -431,6 +431,8 @@ func run(raw []byte) (int, error) {
 		return runStoryJump(&req)
 	case "set_arena_points": // Bunker: Pod Programs › Players (bunker_arena_points.go)
 		return runSetArenaPoints(&req)
+	case "set_possession_batch": // Bunker: Pod Programs › Item Editor › Set (bunker_set_items.go)
+		return runSetPossessionBatch(&req)
 	case "":
 		return 0, errors.New("action required")
 	default:

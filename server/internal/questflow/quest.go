@@ -371,7 +371,7 @@ func (h *QuestHandler) HandleQuestSkip(user *store.UserState, questId, skipCount
 		allDrops = append(allDrops, drops...)
 
 		if questDef.Gold != 0 {
-			user.ConsumableItems[h.Config.ConsumableItemIdForGold] += modScaleGold(questDef.Gold)
+			user.ConsumableItems[h.Config.ConsumableItemIdForGold] += withPermil(modScaleGold(questDef.Gold), h.mainChapterCollectionPermil(user, questId, masterdata.CollectionBonusGold, nowMillis)) // Bunker: costume collection bonus (bunker_collection_bonus.go)
 		}
 		h.applyExpRewards(user, questId, nowMillis)
 	}

@@ -150,9 +150,13 @@ func (h *QuestHandler) computeDropRewards(user *store.UserState, questDef master
 	if h.Campaigns != nil {
 		dropRate = h.Campaigns.QuestDropRate(target, h.campaignFilter(user, nowMillis))
 	}
-	drops = append(drops, h.pickupDrops(questDef, target, dropRate)...) // Bunker: an earlier run's own (bunker_event_runs.go)
+	pickups := h.pickupDrops(questDef, target, dropRate) // Bunker: an earlier run's own (bunker_event_runs.go)
+	boost := h.dropBoostFor(user, target, nowMillis)     // Bunker: drop rate bonuses (bunker_drop_boost.go)
+	drops = append(drops, pickups...)
 	drops = append(drops, slabDrops(target, dropRate.Apply, randInt64n)...)
 	drops = append(drops, chapterMemoirDrops(questDef.QuestId, dropRate.Apply)...)
+	listed := listedDropsFor(questDef.QuestId, pickups, drops, dropRate.Apply, randInt64n, boost) // Bunker: what the game lists but doesn't show (bunker_listed_drops.go)
+	drops = append(boostCounts(drops, boost, randInt64n), listed...)
 	drops = h.appendBonusDrops(user, drops, target, nowMillis)
 	return modScaleDrops(spendableMedals(h.applyImportantItemDropCounts(user, drops, target, nowMillis, randInt64n)), target)
 }
@@ -194,14 +198,16 @@ func (h *QuestHandler) applyExpRewards(user *store.UserState, questId int32, now
 	if questDef.CharacterExp != 0 {
 		for id := range deckCharacterIds {
 			row := user.Characters[id]
-			row.Exp += modScaleExp(questDef.CharacterExp)
+			exp := withPermil(modScaleExp(questDef.CharacterExp), h.characterExpBonusPermil(questDef, id, nowMillis)) // Bunker: quest bonus EXP (bunker_exp_bonus.go)
+			row.Exp += exp
 			row.Level, row.Exp = gameutil.LevelAndCap(row.Exp, h.CharacterExpThresholds)
 			user.Characters[id] = row
-			log.Printf("[applyExpRewards] questId=%d character=%d: +%d exp -> total=%d level=%d", questId, id, modScaleExp(questDef.CharacterExp), row.Exp, row.Level)
+			log.Printf("[applyExpRewards] questId=%d character=%d: +%d exp -> total=%d level=%d", questId, id, exp, row.Exp, row.Level)
 		}
 	}
 
 	if questDef.CostumeExp != 0 {
+		costumeExp := withPermil(modScaleExp(questDef.CostumeExp), h.mainChapterCollectionPermil(user, questId, masterdata.CollectionBonusCostumeExp, nowMillis)) // Bunker: costume collection bonus (bunker_collection_bonus.go)
 		for key := range deckCostumeUuids {
 			row := user.Costumes[key]
 			cm, ok := h.CostumeById[row.CostumeId]
@@ -217,12 +223,12 @@ func (h *QuestHandler) applyExpRewards(user *store.UserState, questId int32, now
 					continue
 				}
 			}
-			row.Exp += modScaleExp(questDef.CostumeExp)
+			row.Exp += costumeExp
 			if thresholds, ok := h.CostumeExpByRarity[cm.RarityType]; ok {
 				row.Level, row.Exp = gameutil.ApplyExpWithMaxLevel(row.Exp, thresholds, maxLevel)
 			}
 			user.Costumes[key] = row
-			log.Printf("[applyExpRewards] questId=%d costume=%d (key=%s): +%d exp -> total=%d level=%d", questId, row.CostumeId, key, modScaleExp(questDef.CostumeExp), row.Exp, row.Level)
+			log.Printf("[applyExpRewards] questId=%d costume=%d (key=%s): +%d exp -> total=%d level=%d", questId, row.CostumeId, key, costumeExp, row.Exp, row.Level)
 		}
 	}
 }
@@ -270,7 +276,7 @@ func (h *QuestHandler) applyExpAndGoldRewards(user *store.UserState, questId int
 	h.applyExpRewards(user, questId, nowMillis)
 
 	if questDef.Gold != 0 {
-		gold := modScaleGold(questDef.Gold)
+		gold := withPermil(modScaleGold(questDef.Gold), h.mainChapterCollectionPermil(user, questId, masterdata.CollectionBonusGold, nowMillis)) // Bunker: costume collection bonus (bunker_collection_bonus.go)
 		user.ConsumableItems[h.Config.ConsumableItemIdForGold] += gold
 		log.Printf("[applyQuestRewards] questId=%d gold: +%d -> total=%d", questId, gold, user.ConsumableItems[h.Config.ConsumableItemIdForGold])
 	}

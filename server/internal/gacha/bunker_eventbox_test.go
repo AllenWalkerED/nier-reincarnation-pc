@@ -68,3 +68,39 @@ func TestEventBoxLevelsUp(t *testing.T) {
 		t.Fatalf("after replenishing: %+v", bs)
 	}
 }
+
+// A level's own unlimited prizes (the materials the game lists for it) join
+// the shared pool on the draws that don't come from the box.
+func TestEventBoxUnlimitedDrawsIncludeTheLevelsOwn(t *testing.T) {
+	box := masterdata.EventSummon{Base: 1, Levels: []masterdata.EventLevel{{
+		Chance:    0.5,
+		Items:     []masterdata.BoxPrize{{Type: 6, Id: 1, Count: 1, Stock: 1, Target: true}},
+		Unlimited: []masterdata.BoxPrize{{Type: 5, Id: 300001, Count: 1}},
+	}}}
+	bs := store.GachaBannerState{}
+	got := map[int32]int{}
+	for _, it := range drawEventBox(&bs, box, testUnlimited, 400) {
+		got[it.PossessionId]++
+	}
+	if got[1] != 1 || got[300001] < 100 || got[100002] < 100 || got[300001]+got[100002] != 399 {
+		t.Fatalf("drawn: %v", got)
+	}
+}
+
+// Unlimited prizes are drawn by weight: a level's own rarer prizes come up
+// less often than the shared pool's (weight 0 counts as 10, a common one).
+func TestEventBoxUnlimitedDrawsAreWeighted(t *testing.T) {
+	box := masterdata.EventSummon{Base: 1, Levels: []masterdata.EventLevel{{
+		Chance:    0,
+		Unlimited: []masterdata.BoxPrize{{Type: 5, Id: 400, Count: 1, Weight: 1}},
+	}}}
+	bs := store.GachaBannerState{}
+	got := map[int32]int{}
+	for _, it := range drawEventBox(&bs, box, testUnlimited, 11000) {
+		got[it.PossessionId]++
+	}
+	// 10:1 — about 10,000 and 1,000.
+	if got[400] < 700 || got[400] > 1300 || got[100002]+got[400] != 11000 {
+		t.Fatalf("drawn: %v", got)
+	}
+}

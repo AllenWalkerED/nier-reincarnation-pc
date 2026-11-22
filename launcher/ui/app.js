@@ -45,6 +45,7 @@ const DEFAULTS = {
   custom: { renderScale: "", upscale: "", aniso: "", vsync: "", idleFps: "",
             shadows: "", reflections: "", bloom: "", vignette: "", textures: "" },
   language: { text: "", voice: "" },
+  system: { updateCheck: "on" },
   // Bunker's mods (save\\mods.json, read by the server: internal/mods). Off is
   // the original game; unlimited shop stock is on so summons can be bought as
   // often as you like.
@@ -155,6 +156,7 @@ native && native.addEventListener("message", (e) => {
       freeToggle();
       save();
     }
+    updateAtStart();
     if (settings.version < 6) {  // v6: Direct3D 11 is the default renderer (Vulkan stays a choice)
       settings.version = 6;
       if (settings.graphics.backend === "vulkan") settings.graphics.backend = "d3d11";
@@ -171,7 +173,9 @@ native && native.addEventListener("message", (e) => {
     document.getElementById("save").textContent = info.save ? `game.db · ${info.save}` : "New";
   } else if (kind === "picked") {
     const [what, ...where] = text.split(":");
-    picked(what, where.join(":"));
+    if (what === "phone-save") phoneImport(where.join(":"));
+    else if (what === "save-export") phoneExport(where.join(":"));
+    else picked(what, where.join(":"));
   } else if (kind === "setup-line") {
     setupLine(text);
   } else if (kind === "setup-exit") {
@@ -359,6 +363,50 @@ playButton.addEventListener("click", () => {
   send(lines.join("\n"));
 });
 document.getElementById("quit").addEventListener("click", () => send("quit"));
+
+// ---- updates: the newest release on GitHub --------------------------------------------
+const VERSION = "1.1";
+const LATEST = "https://api.github.com/repos/AllenWalkerED/nier-reincarnation-pc/releases/latest";
+const newer = (a, b) => {  // is version a newer than b ("1.10" > "1.9")
+  const x = a.split(".").map(Number), y = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  }
+  return false;
+};
+async function checkUpdate(manual) {
+  const note = document.getElementById("update-note");
+  const banner = document.getElementById("update-banner");
+  if (manual) note.textContent = "Checking...";
+  try {
+    const r = await fetch(LATEST, { headers: { Accept: "application/vnd.github+json" }, cache: "no-store" });
+    if (!r.ok) throw new Error("GitHub answered " + r.status);
+    const tag = String((await r.json()).tag_name || "").replace(/^v/i, "");
+    if (tag && /^[0-9.]+$/.test(tag) && newer(tag, VERSION)) {
+      const text = `Version ${tag} is out (you have ${VERSION}). Open the download page`;
+      note.innerHTML = `<a href="#" class="update-link">${escapeHtml(text)}</a>`;
+      banner.innerHTML = `<a href="#" class="update-link">${escapeHtml(text)}</a>`;
+      banner.hidden = false;
+    } else if (manual) {
+      note.textContent = `You have the newest version (${VERSION}).`;
+    }
+  } catch (e) {
+    if (manual) note.textContent = "Could not reach GitHub: " + e.message;
+  }
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".update-link")) {
+    e.preventDefault();
+    send("open-releases");
+  }
+});
+document.getElementById("update-check").addEventListener("click", () => checkUpdate(true));
+let updateChecked = false;
+function updateAtStart() {
+  if (updateChecked || settings.system.updateCheck === "off") return;
+  updateChecked = true;
+  checkUpdate(false);
+}
 
 // save\mods.json as the server reads it: the switches as they are, the
 // multipliers as numbers (1 is off).
@@ -678,6 +726,7 @@ function renderSlots() {
         <button class="tool" data-act="use" ${s.active ? "disabled" : ""}>Use</button>
         <button class="tool" data-act="edit" ${s.started ? "" : "disabled"}>Edit</button>
         <button class="tool" data-act="rename">Rename</button>
+        <button class="tool" data-act="export" ${s.started ? "" : "disabled"} title="A backup the phone (Bunker) imports">Export</button>
         <button class="tool warn" data-act="delete" ${s.active ? "disabled title=\"Use another save first\"" : ""}>Delete</button>
       </div></div>`;
   }).join("") || '<p class="lead">No saves yet.</p>';
@@ -699,6 +748,9 @@ document.getElementById("slots").addEventListener("click", async (e) => {
   } else if (b.dataset.act === "rename") {
     const to = await ask("Rename", "The save's new name:", { input: name, ok: "Rename" });
     if (to) savesDo({ op: "rename", id, name: to }, "Renamed.");
+  } else if (b.dataset.act === "export") {
+    exportId = id;
+    send("pick-save-export\n" + name);
   } else if (b.dataset.act === "delete") {
     if (!(await ask("Delete this save", `Delete "${name}"? Its progress is no longer offered here. A copy is kept in the backups folder (save\\slot-backups) in case you change your mind.`, { ok: "Delete" }))) return;
     if (ed && ed.id === id) closeEditor();
@@ -721,6 +773,22 @@ document.getElementById("slot-backup").addEventListener("click", () => {
   savesDo({ op: "backup", id }, (r) => `A copy of "${slotName(id)}" was kept: ${r.backup}.`);
 });
 document.getElementById("slot-backups").addEventListener("click", () => send("saves-folder"));
+
+// The phone (Bunker's Export / Import save backup): a backup becomes a new
+// save here, and a save here becomes a backup the phone imports.
+let exportId = null;
+document.getElementById("slot-import").addEventListener("click", () => send("pick\nphone-save"));
+async function phoneImport(path) {
+  const name = await ask("Import from phone", "The backup becomes a new save; your saves here stay as they are. Name of the new save:", { input: "From phone", ok: "Import" });
+  if (!name) return;
+  savesDo({ op: "import", path, name }, `"${name}" was imported. Choose Use on it to play it.`);
+}
+function phoneExport(path) {
+  const id = exportId;
+  exportId = null;
+  if (!id) return;
+  savesDo({ op: "export", id, path }, `"${slotName(id)}" was exported to ${path.split("\\").pop()}. On the phone, use Bunker's Import save backup.`);
+}
 
 // ---- the editor ----
 const RARITY = { 10: "★1", 20: "★2", 30: "★3", 40: "★4", 50: "★5" };

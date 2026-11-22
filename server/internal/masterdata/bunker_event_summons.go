@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 
 	"lunar-tear/server/internal/model"
@@ -37,19 +38,37 @@ type BoxPrize struct {
 	Stock  int32 `json:"stock"`
 	Target bool  `json:"target"`
 	Main   bool  `json:"main"`
+	// Weight is an unlimited prize's share of the unlimited draws; 0 counts as
+	// 10, a common material's (chapterBoxCounts), so the shared pool is drawn
+	// alike as before and a level's own rarer prizes come up less often.
+	Weight int32 `json:"weight,omitempty"`
 }
 
 // EventLevel is one level's box: a draw takes one of its prizes with
-// probability Chance (every remaining one alike), else an unlimited prize.
+// probability Chance (every remaining one alike), else an unlimited prize
+// (the shared pool's or the level's own).
 type EventLevel struct {
 	Chance float64    `json:"chance"`
 	Items  []BoxPrize `json:"items"`
+	// Unlimited is the level's own unlimited prizes, drawn alike with the
+	// shared pool: the materials the game lists for the level
+	// (withListedPrizes), which the reconstructed box lacks.
+	Unlimited []BoxPrize `json:"unlimited,omitempty"`
 }
 
 // EventSummon is one event's summon: its levels in order; the last one
-// replenishes once emptied.
+// replenishes once emptied. An event can have several: one per run when a
+// rerun brought its own (Run), and the Vol. 2 and Vol. 3 summons added
+// partway through a run (OpensDays).
 type EventSummon struct {
-	Chapter int32        `json:"chapter"`
+	Chapter int32 `json:"chapter"`
+	// Chapters are further quest chapters the summon is open with, as with
+	// Chapter (the once-per-day quests that drop one ticket).
+	Chapters []int32 `json:"chapters,omitempty"`
+	// Run is the run (1 for the first) the summon is open in; 0: every run.
+	Run int32 `json:"run,omitempty"`
+	// OpensDays is the days into a run the summon opens.
+	OpensDays int32 `json:"opens_days,omitempty"`
 	Base    int32        `json:"base"`
 	Assets  []string     `json:"assets"`
 	Tickets []int32      `json:"tickets"`
@@ -91,9 +110,13 @@ func EventSummonRunAt(gachaId int32, nowMillis int64) (chapter int32, open, isEv
 	eventSummons.RLock()
 	defer eventSummons.RUnlock()
 	runs, isEvent := eventSummons.runs[gachaId]
-	for _, r := range runs {
-		if r.start <= nowMillis && nowMillis < r.end+eventSummonGrace {
-			return r.chapter, true, true
+	// A run that is on comes first: back-to-back chapters (Chapters) would
+	// otherwise give the one before during its grace.
+	for _, grace := range []int64{0, eventSummonGrace} {
+		for _, r := range runs {
+			if r.start <= nowMillis && nowMillis < r.end+grace {
+				return r.chapter, true, true
+			}
 		}
 	}
 	return 0, false, isEvent
@@ -173,6 +196,36 @@ func eventRuns(chapters map[int32]EntityMEventQuestChapter, chapter int32) (runs
 	return runs, start, end, ok
 }
 
+// summonRuns is the runs an event summon is open in: its chapters' runs, only
+// the one it belongs to (Run), each from OpensDays in; and when the first
+// opens and the last closes. ok is false when the calendar lacks its run.
+func summonRuns(chapters map[int32]EntityMEventQuestChapter, ev EventSummon) (runs []eventRun, start, end int64, ok bool) {
+	for _, chapter := range append([]int32{ev.Chapter}, ev.Chapters...) {
+		more, _, _, _ := eventRuns(chapters, chapter)
+		runs = append(runs, more...)
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].start < runs[j].start })
+	if ev.Run > 0 {
+		if int(ev.Run) > len(runs) {
+			return nil, 0, 0, false
+		}
+		runs = runs[ev.Run-1 : ev.Run]
+	}
+	const day = int64(24 * 60 * 60 * 1000)
+	for i := range runs {
+		runs[i].start += int64(ev.OpensDays) * day
+	}
+	for i, r := range runs {
+		if i == 0 || r.start < start {
+			start = r.start
+		}
+		if i == 0 || r.end > end {
+			end = r.end
+		}
+	}
+	return runs, start, end, len(runs) > 0
+}
+
 // AddEventSummons adds each event's summon for its event's dates (as the game
 // data has them, so the Original calendar moves them with the event).
 func AddEventSummons(entries []store.GachaCatalogEntry) []store.GachaCatalogEntry {
@@ -190,6 +243,7 @@ func AddEventSummons(entries []store.GachaCatalogEntry) []store.GachaCatalogEntr
 	for _, c := range rows {
 		chapters[c.EventQuestChapterId] = c
 	}
+	f = withListedPrizes(f, eventSummonListed(), materialRarity())
 	setEventSummons(f)
 	before := len(entries)
 	entries = addEventSummons(entries, f, chapters)
@@ -212,7 +266,10 @@ func addEventSummons(entries []store.GachaCatalogEntry, f eventSummonsFile, chap
 		if _, ok := chapters[ev.Chapter]; !ok || taken[ev.Base] || len(ev.Levels) == 0 || len(ev.Tickets) == 0 {
 			continue
 		}
-		runs, start, end, _ := eventRuns(chapters, ev.Chapter)
+		runs, start, end, ok := summonRuns(chapters, ev)
+		if !ok {
+			continue
+		}
 		allRuns[ev.Base] = runs
 		e := store.GachaCatalogEntry{
 			GachaId:             ev.Base,
@@ -268,4 +325,61 @@ func SetEventSummonRunsForTest(gachaId int32, runs map[int32][2]int64) {
 	}
 	sort.Slice(rs, func(i, j int) bool { return rs[i].start < rs[j].start })
 	eventSummons.runs[gachaId] = rs
+}
+
+// withListedPrizes is a copy of f whose levels also hold the materials the game
+// lists for them (m_possession_acquisition_route, "2/event_<chapter>_<NN>/..."
+// routes, by the level's summon id), as the level's own unlimited prizes, one
+// each, weighted by rarity like the chapter boxes' counts. The box, its stock
+// and targets stay as they were, so the pace to level up is unchanged. A material the level's box or the shared pool has already
+// is left out.
+func withListedPrizes(f eventSummonsFile, listed map[int32][]int32, rarity map[int32]int32) eventSummonsFile {
+	shared := map[int32]bool{}
+	for _, p := range f.Unlimited {
+		shared[p.Id] = true
+	}
+	out := f
+	out.Events = make([]EventSummon, len(f.Events))
+	for i, e := range f.Events {
+		e.Levels = append([]EventLevel(nil), e.Levels...)
+		for n := range e.Levels {
+			level := e.Levels[n]
+			level.Unlimited = append([]BoxPrize(nil), level.Unlimited...)
+			has := map[int32]bool{}
+			for _, p := range append(append([]BoxPrize(nil), level.Items...), level.Unlimited...) {
+				has[p.Id] = true
+			}
+			for _, id := range listed[e.Base+int32(n)] {
+				weight := chapterBoxCounts[rarity[id]]
+				if has[id] || shared[id] || weight == 0 {
+					continue
+				}
+				has[id] = true
+				level.Unlimited = append(level.Unlimited, BoxPrize{Type: int32(model.PossessionTypeMaterial), Id: id, Count: 1, Weight: weight})
+			}
+			e.Levels[n] = level
+		}
+		out.Events[i] = e
+	}
+	return out
+}
+
+// eventSummonListed is the materials the game lists for each event summon
+// level, by the level's summon id.
+func eventSummonListed() map[int32][]int32 {
+	routes, err := utils.ReadTable[EntityMPossessionAcquisitionRoute]("m_possession_acquisition_route")
+	if err != nil {
+		log.Printf("[EventSummons] m_possession_acquisition_route: %v", err)
+		return nil
+	}
+	sort.SliceStable(routes, func(i, j int) bool { return routes[i].SortOrder < routes[j].SortOrder })
+	out := map[int32][]int32{}
+	for _, r := range routes {
+		if r.AcquisitionRouteType != acquisitionRouteSummon || !strings.HasPrefix(r.RelationValue, "2/") ||
+			model.PossessionType(r.PossessionType) != model.PossessionTypeMaterial {
+			continue
+		}
+		out[r.RouteId] = append(out[r.RouteId], r.PossessionId)
+	}
+	return out
 }

@@ -473,9 +473,13 @@ std::wstring pick(const std::wstring& kind) {
         dlg->SetFileTypes(1, f);
         dlg->SetTitle(L"NieR Re[in]carnation 3.7.1, arm64 APK");
     } else if (kind == L"assets") {
-        static const COMDLG_FILTERSPEC f[] = {{L"Asset dump (.7z)", L"*.7z"}};
+        static const COMDLG_FILTERSPEC f[] = {{L"Asset dump (.7z, .zip)", L"*.7z;*.zip"}};
         dlg->SetFileTypes(1, f);
         dlg->SetTitle(L"resource_dump_android.7z");
+    } else if (kind == L"phone-save") {
+        static const COMDLG_FILTERSPEC f[] = {{L"Save backup (.zip, game.db)", L"*.zip;*.db"}};
+        dlg->SetFileTypes(1, f);
+        dlg->SetTitle(L"A save backup from the phone (Bunker's Export save backup)");
     } else if (kind == L"master") {
         static const COMDLG_FILTERSPEC f[] = {{L"Master data (.bin.e)", L"*.bin.e"}, {L"All files", L"*.*"}};
         dlg->SetFileTypes(2, f);
@@ -574,15 +578,19 @@ std::wstring date_stamp() {
 }
 
 // Where to save the zip (the Desktop by default), or "" when cancelled.
-std::wstring pick_export_path() {
+std::wstring pick_save_path(const wchar_t* title, const std::wstring& file);
+std::wstring pick_export_path() { return pick_save_path(L"Save the logs for a bug report", L"NieR-logs-" + date_stamp() + L".zip"); }
+
+// A Save dialog for a .zip, on the desktop by default.
+std::wstring pick_save_path(const wchar_t* title, const std::wstring& file) {
     std::wstring chosen;
     IFileSaveDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) return chosen;
     static const COMDLG_FILTERSPEC f[] = {{L"Zip archive (.zip)", L"*.zip"}};
     dlg->SetFileTypes(1, f);
     dlg->SetDefaultExtension(L"zip");
-    dlg->SetTitle(L"Save the logs for a bug report");
-    dlg->SetFileName((L"NieR-logs-" + date_stamp() + L".zip").c_str());
+    dlg->SetTitle(title);
+    dlg->SetFileName(file.c_str());
     IShellItem* desktop = nullptr;
     if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Desktop, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&desktop)))) {
         dlg->SetDefaultFolder(desktop);
@@ -898,6 +906,17 @@ void on_page_message(const std::wstring& msg) {
             return;
         }
         std::thread(run_saves, narrow(rest)).detach();
+    } else if (cmd == L"pick-save-export") {
+        // A save to the phone: where to write its backup ("picked:save-export:<path>").
+        std::wstring name = rest;
+        for (auto& c : name) if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
+        const std::wstring out = pick_save_path(L"Export the save for the phone (Bunker's Import save backup)",
+                                                L"NieR-save-" + name + L"-" + date_stamp() + L".zip");
+        if (!out.empty()) to_page(L"picked:save-export:" + out);
+    } else if (cmd == L"open-releases") {
+        // Settings › System › Updates: the port's download page (only this address).
+        ShellExecuteW(nullptr, L"open", L"https://github.com/AllenWalkerED/nier-reincarnation-pc/releases/latest", nullptr,
+                      nullptr, SW_SHOWNORMAL);
     } else if (cmd == L"saves-folder") {
         const std::wstring dir = path(L"save\\slot-backups");
         CreateDirectoryW(dir.c_str(), nullptr);

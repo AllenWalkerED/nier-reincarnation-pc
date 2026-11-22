@@ -99,8 +99,8 @@ def step_check(args):
     if args.assets.is_dir():
         if not assets_folder(args.assets):
             fail("That folder does not hold the game's assets (revisions\\0\\list.bin).")
-    elif not (args.assets.is_file() and args.assets.suffix.lower() == ".7z"):
-        fail("The assets are resource_dump_android.7z, or a folder holding its revisions\\0.")
+    elif not (args.assets.is_file() and args.assets.suffix.lower() in (".7z", ".zip")):
+        fail("The assets are resource_dump_android.7z (or a .zip of it), or a folder holding its revisions\\0.")
 
 
 def step_assets(args, root: Path):
@@ -119,7 +119,11 @@ def step_assets(args, root: Path):
         fail(f"Extracting the assets needs about 23 GB free on that drive; {free / 1e9:.1f} GB is free. "
              "Free some space, or extract revisions\\0 elsewhere and choose that folder.")
     seven = root / "tools" / "7zip" / "7za.exe"
-    cmd = [str(seven), "x", str(args.assets), f"-o{dest}", "revisions\\0", "-y", "-bsp1", "-bso0", "-bse1"]
+    # The dump's revisions\0 may sit inside a folder of the archive (a .7z or a .zip).
+    prefix = archive_prefix(seven, args.assets)
+    if prefix is None:
+        fail("That archive does not hold the game's assets (revisions\\0\\list.bin).")
+    cmd = [str(seven), "x", str(args.assets), f"-o{dest}", prefix + "revisions\\0", "-y", "-bsp1", "-bso0", "-bse1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     buf = b""
     last = -1
@@ -134,8 +138,28 @@ def step_assets(args, root: Path):
                 last = pct
                 say("progress", str(pct))
         buf = buf[-64:]
-    if proc.wait() != 0 or not (dest / "revisions" / "0" / "list.bin").is_file():
+    code = proc.wait()
+    if code == 0 and prefix:
+        inner = dest / prefix / "revisions" / "0"
+        if (inner / "list.bin").is_file():
+            (dest / "revisions").mkdir(exist_ok=True)
+            shutil.move(str(inner), str(dest / "revisions" / "0"))
+            shutil.rmtree(dest / Path(prefix).parts[0], ignore_errors=True)
+    if code != 0 or not (dest / "revisions" / "0" / "list.bin").is_file():
         fail("Extracting the assets failed: is the archive whole?")
+
+
+def archive_prefix(seven: Path, archive: Path):
+    """The folder inside the archive that holds revisions\\0 ("" at the top), or None."""
+    r = subprocess.run([str(seven), "l", "-slt", "-ba", str(archive)], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    tail = "revisions\\0\\list.bin"
+    for line in r.stdout.splitlines():
+        if line.startswith("Path = "):
+            path = line[7:].replace("/", "\\")
+            if path.lower().endswith(tail):
+                return path[: len(path) - len(tail)]
+    return None
 
 
 def step_master(args, root: Path):

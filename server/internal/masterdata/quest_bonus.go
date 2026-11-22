@@ -26,6 +26,7 @@ type QuestBonusCatalog struct {
 	WeaponGroups         map[int32][]EntityMQuestBonusWeaponGroup
 	EffectGroups         map[int32][]EntityMQuestBonusEffectGroup
 	DropRewardsByEffect  map[int32][]EntityMQuestBonusDropReward
+	ExpByEffect          map[int32]EntityMQuestBonusExp // Bunker: EXP effects (m_quest_bonus_exp)
 	TermsByGroup         map[int32][]EntityMQuestBonusTermGroup
 }
 
@@ -58,6 +59,10 @@ func LoadQuestBonusCatalog() (*QuestBonusCatalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load quest bonus term group table: %w", err)
 	}
+	exps, err := utils.ReadTable[EntityMQuestBonusExp]("m_quest_bonus_exp")
+	if err != nil {
+		return nil, fmt.Errorf("load quest bonus exp table: %w", err)
+	}
 
 	c := &QuestBonusCatalog{
 		BonusById:            make(map[int32]EntityMQuestBonus, len(bonuses)),
@@ -66,6 +71,7 @@ func LoadQuestBonusCatalog() (*QuestBonusCatalog, error) {
 		WeaponGroups:         make(map[int32][]EntityMQuestBonusWeaponGroup),
 		EffectGroups:         make(map[int32][]EntityMQuestBonusEffectGroup),
 		DropRewardsByEffect:  make(map[int32][]EntityMQuestBonusDropReward),
+		ExpByEffect:          make(map[int32]EntityMQuestBonusExp, len(exps)),
 		TermsByGroup:         make(map[int32][]EntityMQuestBonusTermGroup),
 	}
 	for _, b := range bonuses {
@@ -89,6 +95,9 @@ func LoadQuestBonusCatalog() (*QuestBonusCatalog, error) {
 	}
 	for _, r := range drops {
 		c.DropRewardsByEffect[r.QuestBonusEffectId] = append(c.DropRewardsByEffect[r.QuestBonusEffectId], r)
+	}
+	for _, r := range exps {
+		c.ExpByEffect[r.QuestBonusEffectId] = r
 	}
 	for _, r := range terms {
 		c.TermsByGroup[r.QuestBonusTermGroupId] = append(c.TermsByGroup[r.QuestBonusTermGroupId], r)
@@ -155,10 +164,24 @@ type ImportantItemDropCount struct {
 	ItemGroupId     int32 // 0: every drop
 }
 
+// ImportantItemDropRate is a DROP_RATE effect an owned important item gives
+// (m_important_item_effect_drop_rate).
+type ImportantItemDropRate struct {
+	ImportantItemId int32
+	GroupingId      int32
+	Priority        int32
+	StartDatetime   int64
+	EndDatetime     int64
+	RatePermil      int32
+	QuestGroupId    int32
+	ItemGroupId     int32 // 0: every drop
+}
+
 // ImportantItemEffectCatalog holds m_important_item_effect* for the drop
 // effects of owned important items ("gohobi" items).
 type ImportantItemEffectCatalog struct {
 	DropCounts          []ImportantItemDropCount
+	DropRates           []ImportantItemDropRate
 	QuestGroups         map[int32][]EntityMImportantItemEffectTargetQuestGroup
 	ItemGroups          map[int32][]EntityMImportantItemEffectTargetItemGroup
 	MainQuestDifficulty map[int32]int32 // main QuestId -> DifficultyType
@@ -176,6 +199,10 @@ func LoadImportantItemEffectCatalog() (*ImportantItemEffectCatalog, error) {
 	counts, err := utils.ReadTable[EntityMImportantItemEffectDropCount]("m_important_item_effect_drop_count")
 	if err != nil {
 		return nil, fmt.Errorf("load important item effect drop count table: %w", err)
+	}
+	rates, err := utils.ReadTable[EntityMImportantItemEffectDropRate]("m_important_item_effect_drop_rate")
+	if err != nil {
+		return nil, fmt.Errorf("load important item effect drop rate table: %w", err)
 	}
 	questGroups, err := utils.ReadTable[EntityMImportantItemEffectTargetQuestGroup]("m_important_item_effect_target_quest_group")
 	if err != nil {
@@ -198,6 +225,10 @@ func LoadImportantItemEffectCatalog() (*ImportantItemEffectCatalog, error) {
 	for _, e := range effects {
 		effectById[e.ImportantItemEffectId] = e
 	}
+	rateById := make(map[int32]EntityMImportantItemEffectDropRate, len(rates))
+	for _, r := range rates {
+		rateById[r.ImportantItemEffectDropRateId] = r
+	}
 	countById := make(map[int32]EntityMImportantItemEffectDropCount, len(counts))
 	for _, r := range counts {
 		countById[r.ImportantItemEffectDropCountId] = r
@@ -210,6 +241,21 @@ func LoadImportantItemEffectCatalog() (*ImportantItemEffectCatalog, error) {
 	}
 	for _, it := range items {
 		e, ok := effectById[it.ImportantItemEffectId]
+		if ok && e.ImportantItemEffectType == ImportantItemEffectTypeDropRate {
+			if dr, ok := rateById[e.ImportantItemEffectTargetId]; ok {
+				c.DropRates = append(c.DropRates, ImportantItemDropRate{
+					ImportantItemId: it.ImportantItemId,
+					GroupingId:      e.ImportantItemEffectGroupingId,
+					Priority:        e.Priority,
+					StartDatetime:   e.StartDatetime,
+					EndDatetime:     e.EndDatetime,
+					RatePermil:      dr.RatePermil,
+					QuestGroupId:    dr.ImportantItemEffectTargetQuestGroupId,
+					ItemGroupId:     dr.ImportantItemEffectTargetItemGroupId,
+				})
+			}
+			continue
+		}
 		if !ok || e.ImportantItemEffectType != ImportantItemEffectTypeDropCount {
 			continue
 		}
@@ -229,6 +275,7 @@ func LoadImportantItemEffectCatalog() (*ImportantItemEffectCatalog, error) {
 		})
 	}
 	sort.Slice(c.DropCounts, func(i, j int) bool { return c.DropCounts[i].ImportantItemId < c.DropCounts[j].ImportantItemId })
+	sort.Slice(c.DropRates, func(i, j int) bool { return c.DropRates[i].ImportantItemId < c.DropRates[j].ImportantItemId })
 	for _, r := range questGroups {
 		c.QuestGroups[r.ImportantItemEffectTargetQuestGroupId] = append(c.QuestGroups[r.ImportantItemEffectTargetQuestGroupId], r)
 	}

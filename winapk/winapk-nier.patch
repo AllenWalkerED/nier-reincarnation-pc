@@ -22286,7 +22286,7 @@ index 93b72ed..e2d2f09 100644
 +    return b.result;
 +}
 diff --git a/windows/host/win32_window.cpp b/windows/host/win32_window.cpp
-index 4bb79b9..376013e 100644
+index 4bb79b9..8d3a890 100644
 --- a/windows/host/win32_window.cpp
 +++ b/windows/host/win32_window.cpp
 @@ -8,11 +8,16 @@
@@ -22306,15 +22306,26 @@ index 4bb79b9..376013e 100644
  
  namespace winapk::host {
  
-@@ -247,6 +252,7 @@ bool follow_client(HWND hwnd);
+@@ -77,6 +82,10 @@ COLORREF g_background = RGB(255, 255, 255);  // until the first frame
+ 
+ constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW;
+ 
++// Borderless full screen: WINAPK_FULLSCREEN at start, Alt+Enter to switch.
++bool g_fullscreen = std::getenv("WINAPK_FULLSCREEN") != nullptr;
++RECT g_windowed_rect{};  // the window before Alt+Enter took it full screen
++
+ UINT window_dpi(HWND hwnd) {
+     using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+     static auto fn = reinterpret_cast<GetDpiForWindowFn>(
+@@ -247,6 +256,7 @@ bool follow_client(HWND hwnd);
  // smaller when that does not fit the work area, and the app then follows the
  // smaller window. One that does not follow is shown smaller instead.
  void fit_window(HWND hwnd, HMONITOR mon, UINT dpi, const RECT* at, bool keep_inside) {
-+    if (std::getenv("WINAPK_FULLSCREEN") && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_POPUP)) return;  // stays full screen
++    if (g_fullscreen && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_POPUP)) return;  // stays full screen
      const bool follows = resizable_enabled();
      if (IsIconic(hwnd) || IsZoomed(hwnd)) {
          // A maximized window the app follows has nothing to fit: the box is
-@@ -544,16 +550,25 @@ void send_pointer(HWND hwnd, int action, LPARAM lp) {
+@@ -544,16 +554,25 @@ void send_pointer(HWND hwnd, int action, LPARAM lp) {
                       static_cast<float>(phone.bottom - phone.top));
  }
  
@@ -22346,7 +22357,7 @@ index 4bb79b9..376013e 100644
      }();
      UINT lines = 3;
      SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
-@@ -572,20 +587,18 @@ void send_wheel(HWND hwnd, WPARAM wp, LPARAM lp, bool horizontal) {
+@@ -572,20 +591,18 @@ void send_wheel(HWND hwnd, WPARAM wp, LPARAM lp, bool horizontal) {
      // Client pixels per point, along the scroll axis.
      const float per_point = horizontal ? w / static_cast<float>(g_phone_w) : h / static_cast<float>(g_phone_h);
      // A scrolling view takes the gesture over on the first move past the touch
@@ -22377,7 +22388,7 @@ index 4bb79b9..376013e 100644
  }
  
  int meta_state() {
-@@ -644,7 +657,740 @@ bool started_without_activation() {
+@@ -644,7 +661,775 @@ bool started_without_activation() {
      }
  }
  
@@ -23112,13 +23123,48 @@ index 4bb79b9..376013e 100644
 +        g_last_input_ms.store(GetTickCount64(), std::memory_order_relaxed);
 +}
 +
++// Alt+Enter: borderless over the monitor, or back to the window it was (a
++// window of the phone's shape when the game started full screen). The app
++// follows the new size, as when the user resizes the window.
++void set_fullscreen(HWND hwnd, bool on) {
++    if (on == g_fullscreen) return;
++    if (on) {
++        if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
++        GetWindowRect(hwnd, &g_windowed_rect);
++        MONITORINFO mi{};
++        mi.cbSize = sizeof(mi);
++        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
++        g_fullscreen = true;
++        SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
++        const RECT m = mi.rcMonitor;
++        SetWindowPos(hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
++                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
++    } else {
++        g_fullscreen = false;
++        SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~WS_POPUP) | kStyle);
++        if (g_windowed_rect.right > g_windowed_rect.left) {
++            const RECT& r = g_windowed_rect;
++            SetWindowPos(hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
++                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
++        } else {
++            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
++            const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
++            fit_window(hwnd, mon, window_dpi(hwnd), nullptr, true);
++        }
++    }
++    follow_client(hwnd);
++    place_game_child(hwnd);
++    InvalidateRect(hwnd, nullptr, FALSE);
++    std::fprintf(stderr, "[win.apk] Alt+Enter: %s\n", on ? "full screen" : "window");
++}
++
  LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 +    note_input_message(msg);
 +    if (msg == kMsgGameSurface) return reinterpret_cast<LRESULT>(create_game_child(hwnd));
      switch (msg) {
          case WM_PAINT:
              paint(hwnd);
-@@ -657,6 +1403,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -657,6 +1442,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              // active window: SetFocus would activate an inactive one.
              if (GetActiveWindow() == hwnd && GetFocus() != hwnd) SetFocus(hwnd);
              if (!on_phone(hwnd, lp)) return 0;  // a letterbox bar: nothing of the app is there
@@ -23126,10 +23172,14 @@ index 4bb79b9..376013e 100644
              SetCapture(hwnd);
              g_pointer_down = true;
              send_pointer(hwnd, 0, lp);
-@@ -686,11 +1433,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -686,11 +1472,20 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
          case WM_KEYDOWN:
          case WM_SYSKEYDOWN:
              if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;  // Alt+F4 closes, as everywhere
++            if (msg == WM_SYSKEYDOWN && wp == VK_RETURN) {  // Alt+Enter: full screen or a window
++                if (!(lp & (1 << 30))) set_fullscreen(hwnd, !g_fullscreen);
++                return 0;
++            }
 +            if (msg == WM_KEYDOWN && !(lp & (1 << 30)) && perf::key(static_cast<unsigned>(wp))) return 0;  // F8/F9 (WINAPK_PERF)
              // Alt+Left is Back, as in a browser (Escape is Back too).
              if (msg == WM_SYSKEYDOWN && wp == VK_LEFT) {
@@ -23143,7 +23193,7 @@ index 4bb79b9..376013e 100644
              send_key(0, wp, lp);
              return 0;
          case WM_KEYUP:
-@@ -699,6 +1451,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -699,6 +1494,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  g_input->key(1, 4, 0, 0);
                  return 0;
              }
@@ -23153,14 +23203,14 @@ index 4bb79b9..376013e 100644
              send_key(1, wp, lp);
              return 0;
          // The mouse's back side button is Back too.
-@@ -776,6 +1531,21 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -776,6 +1574,21 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              static bool shown = false;
              const bool first = !shown;
              shown = true;
 +            // WINAPK_FULLSCREEN=1: borderless over the whole monitor from the
 +            // first show, so an app that picks its resolution once at start
 +            // (Unity) picks the screen's.
-+            if (first && std::getenv("WINAPK_FULLSCREEN")) {
++            if (first && g_fullscreen) {
 +                MONITORINFO mi{};
 +                mi.cbSize = sizeof(mi);
 +                GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
@@ -23175,17 +23225,17 @@ index 4bb79b9..376013e 100644
              if ((first && !started_without_activation()) || (!first && foreground_is_ours())) {
                  // Every activity the app starts shows the window again;
                  // SW_SHOWNORMAL would take a maximized window out of it.
-@@ -803,7 +1573,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -803,7 +1616,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              // shape (a portrait column becomes the full width for landscape)
              // and the app follows it. Otherwise the window takes the phone's
              // shape.
 -            if (resizable_enabled() && IsZoomed(hwnd)) {
-+            if ((resizable_enabled() && IsZoomed(hwnd)) || std::getenv("WINAPK_FULLSCREEN")) {
++            if ((resizable_enabled() && IsZoomed(hwnd)) || g_fullscreen) {
 +                // Full screen (WINAPK_FULLSCREEN) keeps the monitor: the app follows it.
                  follow_client(hwnd);
                  InvalidateRect(hwnd, nullptr, FALSE);
              } else {
-@@ -818,6 +1589,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -818,6 +1632,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              SetTimer(hwnd, kTestResizeTimer, 1000, nullptr);
              return 0;
          case WM_TIMER:
@@ -23200,7 +23250,7 @@ index 4bb79b9..376013e 100644
              if (wp == kTestResizeTimer) {
                  KillTimer(hwnd, kTestResizeTimer);
                  wchar_t buf[64];
-@@ -837,6 +1616,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -837,6 +1659,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              g_input->close_requested();
              return 0;
          case WM_SIZE: {
@@ -23208,7 +23258,7 @@ index 4bb79b9..376013e 100644
              // BACK at the task root minimizes the window (moveTaskToBack) and
              // stops the top activity; un-minimizing must resume it, or every
              // touch after that goes to no activity at all.
-@@ -882,6 +1662,23 @@ DWORD WINAPI ui_thread(void* param) {
+@@ -882,6 +1705,23 @@ DWORD WINAPI ui_thread(void* param) {
      wc.lpfnWndProc = window_proc;
      wc.hInstance = GetModuleHandleW(nullptr);
      wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
@@ -23232,7 +23282,7 @@ index 4bb79b9..376013e 100644
      wc.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));  // IDI_APPLICATION
      wc.lpszClassName = kClassName;
      RegisterClassExW(&wc);
-@@ -906,6 +1703,7 @@ DWORD WINAPI ui_thread(void* param) {
+@@ -906,6 +1746,7 @@ DWORD WINAPI ui_thread(void* param) {
          fit_window(g_hwnd, g_plan.monitor ? g_plan.monitor : MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST),
                     window_dpi(g_hwnd), &wr, true);
      }
@@ -23240,7 +23290,7 @@ index 4bb79b9..376013e 100644
      args->ok = g_hwnd != nullptr;
      SetEvent(args->ready);
      if (!g_hwnd) return 1;
-@@ -1125,6 +1923,12 @@ void window_set_orientation_lock(int lock) { g_orientation_lock = lock; }
+@@ -1125,6 +1966,12 @@ void window_set_orientation_lock(int lock) { g_orientation_lock = lock; }
  
  void* window_handle() { return g_hwnd; }
  
@@ -23253,7 +23303,7 @@ index 4bb79b9..376013e 100644
  bool window_phone_rect(int* x, int* y, int* w, int* h) {
      if (!g_hwnd) return false;
      const RECT r = client_app_rect(g_hwnd);
-@@ -1237,3 +2041,7 @@ int android_key_code(unsigned vk, wchar_t ch) {
+@@ -1237,3 +2084,7 @@ int android_key_code(unsigned vk, wchar_t ch) {
  }
  
  }  // namespace winapk::host

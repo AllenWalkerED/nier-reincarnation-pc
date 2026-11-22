@@ -21,6 +21,7 @@ type request struct {
 	ID     string           `json:"id"`
 	Name   string           `json:"name"`
 	Switch bool             `json:"switch"`
+	Path   string           `json:"path"` // export / import: the phone backup
 	Edit   lunarbase.PCEdit `json:"edit"`
 }
 
@@ -162,6 +163,33 @@ func run(saveDir, dataRoot, masterPath string, raw []byte) (map[string]any, erro
 			return nil, errors.New("This save has not been played yet: there is nothing to back up.")
 		}
 		return listing(map[string]any{"backup": kept}), nil
+
+	case "export": // to the phone (Bunker's backup format)
+		if f.find(slotID) < 0 {
+			return nil, errors.New("no such save")
+		}
+		if slotID != f.Active {
+			if _, err := s.started(f, slotID); err != nil { // up to date first
+				return nil, err
+			}
+		}
+		if err := s.exportPhone(f, slotID, req.Path); err != nil {
+			return nil, err
+		}
+		return listing(map[string]any{"exported": req.Path}), nil
+
+	case "import": // from the phone: a new slot
+		id, err := s.importPhone(f, req.Path, req.Name)
+		if err != nil && id == "" {
+			return nil, err
+		}
+		if err == nil && req.Switch {
+			err = s.switchTo(f, id)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return listing(map[string]any{"id": id}), nil
 
 	case "read":
 		p, err := s.started(f, slotID)

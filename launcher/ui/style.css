@@ -372,3 +372,6 @@ body.working, body.working * { cursor: progress !important; }
 .pic.always { cursor: default; border-style: dashed; }
 .pic.always:hover { background: rgba(233, 228, 216, .1); }
 .pic.always .state { background: var(--bar); color: var(--on-bar); font-weight: bold; }
+
+/* Updates: a newer release on GitHub */
+.status.update a, #update-note a { color: var(--ink); text-decoration: underline; cursor: pointer; }

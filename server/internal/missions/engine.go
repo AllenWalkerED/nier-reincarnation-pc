@@ -58,6 +58,7 @@ type counts struct {
 	byCostume map[string]map[int32]int64
 	byChar    map[string]map[int32]int64
 	gacha     map[string]int64                      // "" all, "daily", "chapter"
+	banners   map[int32]int64                       // summon id -> draws
 	explores  map[int32]int64                       // explore id -> explorations finished
 	rhythm    map[int32]int64                       // concert LiveType -> taps in one performance
 	pvp       int                                   // an Arena battle: pvpWin or pvpLoss
@@ -79,7 +80,7 @@ type questClear struct {
 
 func newCounts() *counts {
 	return &counts{amount: map[string]int64{}, byWeapon: map[string]map[int32]int64{},
-		byCostume: map[string]map[int32]int64{}, byChar: map[string]map[int32]int64{}, gacha: map[string]int64{},
+		byCostume: map[string]map[int32]int64{}, byChar: map[string]map[int32]int64{}, gacha: map[string]int64{}, banners: map[int32]int64{},
 		explores: map[int32]int64{}, rhythm: map[int32]int64{}}
 }
 
@@ -172,7 +173,7 @@ func collect(before, after *store.UserState, method string, req any) *counts {
 	}
 	for id, q := range after.Quests {
 		n := int64(q.ClearCount) - int64(before.Quests[id].ClearCount)
-		if n <= 0 {
+		if n <= 0 || !playedOfFamily(after, before, id) {
 			continue
 		}
 		number := deck
@@ -277,6 +278,7 @@ func collect(before, after *store.UserState, method string, req any) *counts {
 			continue
 		}
 		c.gacha[""] += n
+		c.banners[id] += n
 		if GachaLabel != nil && GachaLabel(id) == model.GachaLabelChapter {
 			c.gacha["chapter"] += n
 		}
@@ -342,6 +344,13 @@ func (cat *Catalog) amountFor(m *Mission, c *counts) int64 {
 	case "rhythm_tap":
 		return c.rhythm[r.LiveType]
 	case "gacha_draw":
+		if len(r.Gachas) > 0 {
+			var n int64
+			for _, id := range r.Gachas {
+				n += c.banners[id]
+			}
+			return n
+		}
 		return c.gacha[r.Gacha]
 	case "user_message":
 		if c.message != nil && messageMatches(r.Word, *c.message) {
@@ -742,4 +751,27 @@ func (cat *Catalog) trackCompletion(u *store.UserState, now, today int64) {
 			set(u, m, int64(m.ClearConditionValue), now)
 		}
 	}
+}
+
+// playedOfFamily: a clear counts once for a quest and its earlier runs' copies,
+// which share their progress (store.LinkQuests): for the one played (the event
+// quest in play before the change, finishing clears it; else the first whose clear count rose).
+func playedOfFamily(after, before *store.UserState, id int32) bool {
+	family := store.QuestFamily(id)
+	if len(family) == 1 {
+		return true
+	}
+	for _, current := range []int32{before.EventQuest.CurrentQuestId, after.EventQuest.CurrentQuestId} {
+		for _, member := range family {
+			if member == current {
+				return id == current
+			}
+		}
+	}
+	for _, member := range family {
+		if after.Quests[member].ClearCount > before.Quests[member].ClearCount {
+			return id == member
+		}
+	}
+	return true
 }

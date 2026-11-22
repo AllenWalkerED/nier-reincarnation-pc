@@ -9,7 +9,7 @@ additions of this port for Windows. The server is Lunar Tear's work; Bunker's pa
 
 | | |
 |---|---|
-| Bunker | [veritr1x/bunker](https://github.com/veritr1x/bunker) `07dfecc3a77acc0fa6cdc3f841328c34b50c5bec` (version 1.12.7): `server/` as `scripts/prepare.py` makes it |
+| Bunker | [veritr1x/bunker](https://github.com/veritr1x/bunker) `93afbea` (version 1.12.18; this tree was 1.12.7 `07dfecc` until port 1.1, then brought up with Bunker's `overlays/server` changes and four new `patches/` between the two): `server/` as `scripts/prepare.py` makes it |
 | Lunar Tear | [Walter-Sparrow/lunar-tear](https://github.com/Walter-Sparrow/lunar-tear) `63df7d70556a7180f04312abbafc56494cf70545` (Bunker's pin), with Bunker's `overlays/server` and `patches/` |
 | Lunar Base | [NMeliksah/lunar-base](https://github.com/NMeliksah/lunar-base) `b39154099b8f09f5926239e5838abc37260b9b9b`: `internal/lunarbase` (the grant tool) |
 | Comfort Mod | [NavHobbyDev/lunar-tear-comfort-mod](https://github.com/NavHobbyDev/lunar-tear-comfort-mod): most of `internal/mods` |
@@ -31,9 +31,8 @@ missions, and has the mods (`internal/mods`).
   3000, in one process, set up as the app sets them up) with the save folder and the game data
   folder. It copies the launcher's `auth.secret` to `auth.key`, and sets `<save>\backups` as the
   folder for the copy of the save taken before a new version updates it.
-- `mobile/sys_unix.go`, `mobile/sys_windows.go`, `mobile/archive.go`: the two Unix calls of the
-  phone app's archive import (`syscall.Sync`, `syscall.Dup`) behind `syncStorage` and `dupFD`, so
-  the package builds on Windows. The Android and iOS builds are unchanged.
+- (Until 1.1 this port put the archive import's two Unix calls behind its own `sys_*.go`; Bunker
+  1.12.18 does the same in `sync_*.go` and `dup_file_*.go`, which are used now.)
 - `cmd/migrate` and `cmd/probe` (from version 1.3): a save migration and a check of the server's
   first calls, without the game.
 
@@ -51,7 +50,12 @@ page. It refuses every change while 127.0.0.1:8003 is held (the game is open).
   PC's ID if it has another (as Bunker's Import does).
 - Before every edit, switch and delete, the slot is copied (VACUUM INTO) to `<save>\slot-backups`
   (the newest 30 are kept); a deleted slot leaves its copy there.
-- Requests: `list`, `new` (name, switch), `switch`, `rename`, `delete`, `backup`, `read` (the
+- Phone saves (port 1.1, `internal/pcsave/phone.go`): `export` writes a slot as the phone app's
+  Export save backup (a ZIP of game.db, auth.db, auth.key, the format of `bunker-server saves`);
+  `import` makes a phone backup (ZIP) or a bare game.db a NEW slot, leaving the others alone; the
+  PC keeps its own sign-in files and the slot's player takes this PC's ID when it is used.
+  Checked both ways against `bunker-server saves import/export`.
+- Requests: `list`, `new` (name, switch), `switch`, `rename`, `delete`, `backup`, `export`, `import`, `read` (the
   editor's lists: names from the game's English text bundles, owned state from the save), `apply`.
 - `apply` is `lunarbase.PCApply` (`internal/lunarbase/pc_editor.go`): it grants costumes, weapons
   (by evolution chain, first form) and companions with the server's granter, sets their level
@@ -131,7 +135,7 @@ bundle. On the test PC all 2,869 pictures took 7.5 s the first time (62 MB).
 ```
 cd server
 make proto            (or the protoc line in the Makefile)
-go build -trimpath -ldflags "-s -w -X lunar-tear/server/internal/bunkerversion.Version=1.12.7-pc1.4" -o nier-server.exe ./cmd/nier-server
+go build -trimpath -ldflags "-s -w -X lunar-tear/server/internal/bunkerversion.Version=1.12.18-pc1.7" -o nier-server.exe ./cmd/nier-server
 ```
 
 The version (Bunker's, then the port's) is what the server records beside the save

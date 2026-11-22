@@ -284,6 +284,7 @@ func (s *SQLiteStore) UpdateUser(userId int64, mutate func(*store.UserState)) (s
 	// Saved so the upgraded day and week keys replace the old ones.
 	store.UpgradeTimeKeys(&after, gametime.NowMillis())
 	mutate(&after)
+	store.LinkQuests(&after) // Bunker: earlier event runs' quest copies (store/bunker_quest_links.go)
 
 	tx, err := s.db.Begin()
 	if err != nil {

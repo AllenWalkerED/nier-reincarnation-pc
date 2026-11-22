@@ -18,7 +18,7 @@
     <div class="pickrow"><span class="picked" id="pick-apk">com.square_enix.android_googleplay.nierspww 3.7.1, arm64 .apk</span>
       <button class="hex small" data-pick="apk"><span>Choose</span></button></div>
     <h3 class="bar">2 · The game's assets</h3>
-    <div class="pickrow"><span class="picked" id="pick-assets">resource_dump_android.7z (about 15 GB; 21 GB once extracted)</span>
+    <div class="pickrow"><span class="picked" id="pick-assets">resource_dump_android.7z or .zip (about 15 GB; 21 GB once extracted)</span>
       <button class="hex small" data-pick="assets"><span>Archive</span></button>
       <button class="hex small dim" data-pick="assets-folder"><span>Folder</span></button></div>
     <h3 class="bar">3 · The master data</h3>
@@ -40,6 +40,7 @@
     <i class="rule"></i>
   </div>
   <p id="status" class="status">READY</p>
+  <p id="update-banner" class="status update" hidden></p>
   <dl class="record">
     <div><dt>Game files</dt><dd id="files">Checking</dd></div>
     <div><dt>Lunar Tear</dt><dd id="server">Standing by</dd></div>
@@ -342,6 +343,11 @@
               </div>
               <p class="lead">Start over makes a new save and plays it from the beginning; the save you have now is kept and
                 can be used again at any time.</p>
+              <div class="buttons">
+                <button class="hex dim" id="slot-import"><span>Import from phone</span></button>
+              </div>
+              <p class="lead">Saves move between the phone (Bunker) and the PC: on the phone, Export save backup, then
+                Import from phone here (it becomes a new save). Export on a save here makes a backup the phone imports.</p>
             </section>
           </div>
           <div class="col">
@@ -417,6 +423,16 @@
               <h2 class="dialog-title"><i></i><span>Folders</span><i></i></h2>
               <label class="path"><span>Runtime</span><input type="text" data-key="paths.runtime" spellcheck="false" placeholder="bundled: runtime\bin\winapk-runtime.exe"></label>
               <label class="path"><span>Runtime data</span><input type="text" data-key="paths.runtimeData" spellcheck="false" placeholder="bundled: runtime-data"></label>
+            </section>
+            <section class="dialog">
+              <h2 class="dialog-title"><i></i><span>Updates</span><i></i></h2>
+              <h3 class="bar">Check at start</h3>
+              <div class="choice grid" data-key="system.updateCheck">
+                <button data-value="on">On</button><button data-value="off">Off</button>
+              </div>
+              <div class="buttons"><button class="hex dim" id="update-check"><span>Check now</span></button></div>
+              <p class="lead" id="update-note">Asks GitHub for the port's newest release when the launcher opens (nothing
+                else is sent). A newer one shows a link here and on the title screen.</p>
             </section>
           </div>
         </div>
