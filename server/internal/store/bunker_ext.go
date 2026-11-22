@@ -1,0 +1,238 @@
+package store
+
+import (
+	"maps"
+	"reflect"
+	"slices"
+)
+
+// ExtState is save data Bunker adds on top of the Lunar Tear schema. It is
+// stored as one JSON document per user (table user_bunker_ext), so new fields
+// need no migration.
+type ExtState struct {
+	MissionsVersion int32 `json:"missionsVersion,omitempty"`
+	// Rules differing from the legacy Global ID-only mission rules. This
+	// prevents stale regional completions from paying after an update/import.
+	MissionRuleRevisions map[int32]string `json:"missionRuleRevisions,omitempty"`
+	TimeKeysVersion      int32            `json:"timeKeysVersion,omitempty"` // 1: daily timestamps moved to the GMT-8 day
+	CalendarLoop         int32            `json:"calendarLoop,omitempty"`    // Original calendar loop the rotating progress belongs to
+	ChapterGachaIds      int32            `json:"chapterGachaIds,omitempty"` // 1: chapter summon progress moved to model.ChapterGachaIdBase
+	// GachaExec counts draws of summon price options that have a limit
+	// (free once a day, one-time guaranteed): GachaPricePhaseId -> count.
+	GachaExec           map[int32]GachaExecState        `json:"gachaExec,omitempty"`
+	MissionPass         map[int32]MissionPassPointState `json:"missionPass,omitempty"`
+	DailyGroupReward    DailyGroupRewardState           `json:"dailyGroupReward"`
+	SceneChoices        map[int32]SceneChoiceState      `json:"sceneChoices,omitempty"`        // by QuestSceneChoiceGroupingId
+	SceneChoiceHistory  map[int32]int64                 `json:"sceneChoiceHistory,omitempty"`  // QuestSceneChoiceEffectId -> choice time
+	LevelBonusConfirmed map[int32]int32                 `json:"levelBonusConfirmed,omitempty"` // CostumeId -> confirmed bonus level
+	Pvp                 PvpState                        `json:"pvp"`
+	Quest               QuestExtState                   `json:"quest"`
+	Friends             FriendState                     `json:"friends"`
+	LastDeck            LastDeckState                   `json:"lastDeck"`
+	// CharacterViewerFields are the character viewer fields the client was
+	// told were unlocked: CharacterViewerFieldId -> release time.
+	CharacterViewerFields map[int32]int64 `json:"characterViewerFields,omitempty"`
+	// History is the profile's play history counters that are counted
+	// (profile.history.name.NNN -> count; see internal/missions/history.go).
+	History map[int32]int64 `json:"history,omitempty"`
+	// EventLoginBonuses are the stamp cards of dated login bonuses, beside the
+	// everyday one in UserState.LoginBonus.
+	EventLoginBonuses map[int32]UserLoginBonusState `json:"eventLoginBonuses,omitempty"`
+	// Beginner and Comeback are the player's beginner and comeback campaigns
+	// (internal/campaign/status.go).
+	Beginner CampaignJoinState `json:"beginner"`
+	// BoxMonth is, per box summon, the month its box was last refilled.
+	BoxMonth map[int32]int64   `json:"boxMonth,omitempty"`
+	Comeback CampaignJoinState `json:"comeback"`
+	// PanelMissions are the Anecdotes' panel sheets, by web panel mission
+	// (one per run: the Original calendar's copies have ids of their own).
+	PanelMissions map[int32]PanelMissionState `json:"panelMissions,omitempty"`
+	// LimitedOpens are the limited-time offers opened for the player with the
+	// Original calendar, by shop item cell: when each opened and closes
+	// (service/bunker_limited_offers.go).
+	LimitedOpens map[int32]LimitedOpenState `json:"limitedOpens,omitempty"`
+	// GrantOverflow is what this request's grants sent to the gift box
+	// (see PossessionGranter.GrantFullAs); never saved.
+	GrantOverflow []GrantOverflow `json:"-"`
+}
+
+// PvpState is the player's Arena: points, battle points, the computer
+// opponents offered, logs and weekly results (see internal/pvp).
+type PvpState struct {
+	SeasonId           int32   `json:"seasonId,omitempty"`
+	Point              int32   `json:"point,omitempty"`
+	WeekVersion        int64   `json:"weekVersion,omitempty"` // start of the week Point counts for
+	MaxSeasonRank      int32   `json:"maxSeasonRank,omitempty"`
+	BattlePointMilli   int32   `json:"battlePointMilli,omitempty"`
+	BattlePointUpdated int64   `json:"battlePointUpdated,omitempty"` // 0: never used, so full
+	WinStreak          int32   `json:"winStreak,omitempty"`
+	WinStreakUpdated   int64   `json:"winStreakUpdated,omitempty"`
+	DefenseDeckNumber  int32   `json:"defenseDeckNumber,omitempty"`
+	DefenseDeckPower   int32   `json:"defenseDeckPower,omitempty"`
+	DefenseChecked     int64   `json:"defenseChecked,omitempty"` // defense battles are simulated up to here
+	Matching           []int64 `json:"matching,omitempty"`       // computer players offered
+	Opponent           int64   `json:"opponent,omitempty"`       // battle started, not finished
+	// OpponentDecks are the Deck Builder table decks (by position) of the opponents
+	// listed or being fought, so the deck listed is the deck fought (pvp/decktable.go).
+	OpponentDecks     map[int64]int32   `json:"opponentDecks,omitempty"`
+	AttackLog         []PvpLog          `json:"attackLog,omitempty"` // newest first
+	DefenseLog        []PvpLog          `json:"defenseLog,omitempty"`
+	Season            PvpSeasonStats    `json:"season"`
+	Weekly            []PvpWeeklyResult `json:"weekly,omitempty"`            // oldest first
+	RewardWeekVersion int64             `json:"rewardWeekVersion,omitempty"` // weekly rewards paid up to this week
+	RewardSeasonId    int32             `json:"rewardSeasonId,omitempty"`
+	SeasonResult      *PvpWeeklyResult  `json:"seasonResult,omitempty"` // an ended season whose rank reward is not paid yet
+	// Seasons that ended before SeasonResult's and are not paid yet either, oldest first.
+	EarlierSeasonResults []PvpWeeklyResult `json:"earlierSeasonResults,omitempty"`
+	LatestVersion        int64             `json:"latestVersion,omitempty"`
+}
+
+type PvpLog struct {
+	PlayerId    int64 `json:"playerId"`
+	Point       int32 `json:"point"` // the opponent's points
+	Victory     bool  `json:"victory"`
+	Datetime    int64 `json:"datetime"`
+	Fluctuation int32 `json:"fluctuation"` // the player's point change
+}
+
+type PvpSeasonStats struct {
+	AttackWins    int32 `json:"attackWins,omitempty"`
+	AttackLosses  int32 `json:"attackLosses,omitempty"`
+	AttackPoint   int32 `json:"attackPoint,omitempty"`
+	DefenseWins   int32 `json:"defenseWins,omitempty"`
+	DefenseLosses int32 `json:"defenseLosses,omitempty"`
+	DefensePoint  int32 `json:"defensePoint,omitempty"`
+}
+
+type PvpWeeklyResult struct {
+	WeekVersion int64 `json:"weekVersion"`
+	SeasonId    int32 `json:"seasonId"`
+	GroupId     int32 `json:"groupId"`
+	FinalPoint  int32 `json:"finalPoint"`
+	FinalRank   int32 `json:"finalRank"`
+}
+
+// CampaignJoinState is a beginner or comeback campaign the player joined, and when.
+type CampaignJoinState struct {
+	CampaignId int32 `json:"campaignId,omitempty"`
+	Datetime   int64 `json:"datetime,omitempty"`
+}
+
+type GachaExecState struct {
+	Count int32 `json:"count"`
+	Day   int64 `json:"day,omitempty"` // game day the count is for, for daily options
+}
+
+func (p PvpState) Clone() PvpState {
+	out := p
+	out.Matching = slices.Clone(p.Matching)
+	out.AttackLog = slices.Clone(p.AttackLog)
+	out.DefenseLog = slices.Clone(p.DefenseLog)
+	out.Weekly = slices.Clone(p.Weekly)
+	return out
+}
+
+func (p PvpState) Equal(o PvpState) bool { return reflect.DeepEqual(p, o) }
+
+type MissionPassPointState struct {
+	MissionPassId                int32 `json:"missionPassId"`
+	Point                        int32 `json:"point"`
+	PremiumRewardReceivedLevel   int32 `json:"premiumRewardReceivedLevel"`
+	NoPremiumRewardReceivedLevel int32 `json:"noPremiumRewardReceivedLevel"`
+	LatestVersion                int64 `json:"latestVersion"`
+}
+
+type DailyGroupRewardState struct {
+	LastRewardReceiveEventQuestDailyGroupId int32 `json:"lastRewardReceiveEventQuestDailyGroupId"`
+	LastRewardReceiveDatetime               int64 `json:"lastRewardReceiveDatetime"`
+	LatestVersion                           int64 `json:"latestVersion"`
+}
+
+type SceneChoiceState struct {
+	QuestSceneChoiceGroupingId int32 `json:"questSceneChoiceGroupingId"`
+	QuestSceneChoiceEffectId   int32 `json:"questSceneChoiceEffectId"`
+	LatestVersion              int64 `json:"latestVersion"`
+}
+
+func (e *ExtState) EnsureMaps() {
+	if e.MissionPass == nil {
+		e.MissionPass = make(map[int32]MissionPassPointState)
+	}
+	if e.SceneChoices == nil {
+		e.SceneChoices = make(map[int32]SceneChoiceState)
+	}
+	if e.SceneChoiceHistory == nil {
+		e.SceneChoiceHistory = make(map[int32]int64)
+	}
+	if e.LevelBonusConfirmed == nil {
+		e.LevelBonusConfirmed = make(map[int32]int32)
+	}
+	if e.History == nil {
+		e.History = make(map[int32]int64)
+	}
+	if e.PanelMissions == nil {
+		e.PanelMissions = make(map[int32]PanelMissionState)
+	}
+}
+
+// PanelMissionState is one Anecdote run's sheets. Panels are keyed page*100 +
+// their place on the page; PageDone is when a page's sheet was completed.
+type PanelMissionState struct {
+	Progress map[int32]int64 `json:"progress,omitempty"`
+	Claimed  map[int32]bool  `json:"claimed,omitempty"`
+	PageDone map[int32]int64 `json:"pageDone,omitempty"`
+}
+
+func (p PanelMissionState) clone() PanelMissionState {
+	return PanelMissionState{Progress: maps.Clone(p.Progress), Claimed: maps.Clone(p.Claimed), PageDone: maps.Clone(p.PageDone)}
+}
+
+func (p PanelMissionState) equal(o PanelMissionState) bool {
+	return maps.Equal(p.Progress, o.Progress) && maps.Equal(p.Claimed, o.Claimed) && maps.Equal(p.PageDone, o.PageDone)
+}
+
+// LimitedOpenState is one limited-time offer's window for a player.
+type LimitedOpenState struct {
+	Open  int64 `json:"open"`
+	Close int64 `json:"close"`
+}
+
+func (e ExtState) Clone() ExtState {
+	out := e
+	out.LimitedOpens = maps.Clone(e.LimitedOpens)
+	out.MissionRuleRevisions = maps.Clone(e.MissionRuleRevisions)
+	out.MissionPass = maps.Clone(e.MissionPass)
+	out.GachaExec = maps.Clone(e.GachaExec)
+	out.SceneChoices = maps.Clone(e.SceneChoices)
+	out.SceneChoiceHistory = maps.Clone(e.SceneChoiceHistory)
+	out.LevelBonusConfirmed = maps.Clone(e.LevelBonusConfirmed)
+	out.CharacterViewerFields = maps.Clone(e.CharacterViewerFields)
+	if e.PanelMissions != nil {
+		out.PanelMissions = make(map[int32]PanelMissionState, len(e.PanelMissions))
+		for k, v := range e.PanelMissions {
+			out.PanelMissions[k] = v.clone()
+		}
+	}
+	out.History = maps.Clone(e.History)
+	out.EventLoginBonuses = maps.Clone(e.EventLoginBonuses)
+	out.BoxMonth = maps.Clone(e.BoxMonth)
+	out.GrantOverflow = slices.Clone(e.GrantOverflow)
+	out.Pvp = e.Pvp.Clone()
+	out.Quest = e.Quest.Clone()
+	out.Friends = e.Friends.Clone()
+	return out
+}
+
+func (e ExtState) Equal(o ExtState) bool {
+	return e.MissionsVersion == o.MissionsVersion && e.TimeKeysVersion == o.TimeKeysVersion && e.CalendarLoop == o.CalendarLoop && e.ChapterGachaIds == o.ChapterGachaIds && e.DailyGroupReward == o.DailyGroupReward &&
+		maps.Equal(e.MissionPass, o.MissionPass) && maps.Equal(e.GachaExec, o.GachaExec) && maps.Equal(e.LimitedOpens, o.LimitedOpens) &&
+		maps.Equal(e.MissionRuleRevisions, o.MissionRuleRevisions) &&
+		maps.Equal(e.SceneChoices, o.SceneChoices) &&
+		maps.Equal(e.SceneChoiceHistory, o.SceneChoiceHistory) &&
+		maps.Equal(e.LevelBonusConfirmed, o.LevelBonusConfirmed) &&
+		maps.Equal(e.CharacterViewerFields, o.CharacterViewerFields) &&
+		maps.Equal(e.History, o.History) &&
+		e.Pvp.Equal(o.Pvp) && e.Quest.Equal(o.Quest) &&
+		e.Friends.Equal(o.Friends) && e.LastDeck == o.LastDeck &&
+		maps.EqualFunc(e.PanelMissions, o.PanelMissions, PanelMissionState.equal)
+}

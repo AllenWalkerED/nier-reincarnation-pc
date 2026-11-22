@@ -1,0 +1,8 @@
+# libunity.so, NieR Re[in]carnation 3.7.1 (Unity 2019.4.29f1 arm64): the native fill of a managed
+# List<T> (GetComponents and the like) at 0x3b7418. It nulled every element from the new count to
+# the array's whole capacity, and then ran a loop to the capacity that changes nothing; with a pooled
+# list of ~5,000 elements and UGUI's layout rebuilds (MarkLayoutForRebuild) that was billions of
+# iterations and most of each screen change. A List<T> keeps its elements past _size null (Clear and
+# RemoveAt null what they drop, and this function nulls up to the old size), so:
+3b7478 93407c18 b9801a78  # sxtw x24, w0 -> ldrsw x24, [x19, #0x18]: null up to the old _size, not the capacity
+3b7508 5400012a 14000009  # b.ge 0x3b752c -> b 0x3b752c: skip the loop that only computes addresses

@@ -1,0 +1,156 @@
+package main
+
+/*
+#include <stdlib.h>
+*/
+import "C"
+import (
+	"log"
+
+	"lunar-tear/server/mobile"
+)
+
+//export LunarStart
+func LunarStart(data, assets *C.char) *C.char {
+	if e := mobile.Start(C.GoString(data), C.GoString(assets)); e != nil {
+		return C.CString(e.Error())
+	}
+	return C.CString("")
+}
+
+// LunarSetPortOffset applies the build's port offset before LunarStart.
+//
+//export LunarSetPortOffset
+func LunarSetPortOffset(offset C.int) *C.char { return C.CString(mobile.SetPortOffset(int(offset))) }
+
+// LunarPorts reports {"game":…,"assets":…,"accounts":…}.
+//
+//export LunarPorts
+func LunarPorts() *C.char { return C.CString(mobile.Ports()) }
+
+// LunarSelfTest checks that this server answers on each port as the game expects.
+//
+//export LunarSelfTest
+func LunarSelfTest() *C.char { return C.CString(mobile.SelfTest()) }
+
+//export LunarStop
+func LunarStop() { mobile.Stop() }
+
+// LunarRequestTitle sends the running game back to its title screen on its
+// next call, so it loads a change Pod Programs made beside it.
+//
+//export LunarRequestTitle
+func LunarRequestTitle() { mobile.RequestTitle() }
+
+//export LunarStatus
+func LunarStatus() *C.char { return C.CString(mobile.Status()) }
+
+//export LunarCheck
+func LunarCheck(root *C.char) *C.char { return C.CString(mobile.CheckDatabase(C.GoString(root))) }
+
+//export LunarPrepareBackup
+func LunarPrepareBackup(root *C.char) *C.char {
+	return C.CString(mobile.PrepareBackup(C.GoString(root)))
+}
+
+//export LunarTexture
+func LunarTexture(bundle, target *C.char, maxSide C.int) *C.char {
+	return C.CString(mobile.Texture(C.GoString(bundle), C.GoString(target), int(maxSide)))
+}
+
+//export LunarAudio
+func LunarAudio(bundle, target *C.char) *C.char {
+	return C.CString(mobile.Audio(C.GoString(bundle), C.GoString(target)))
+}
+
+//export LunarModel
+func LunarModel(actor, target *C.char) *C.char {
+	return C.CString(mobile.Model(C.GoString(actor), C.GoString(target)))
+}
+
+//export LunarMotion
+func LunarMotion(clip, actor, target *C.char) *C.char {
+	return C.CString(mobile.Motion(C.GoString(clip), C.GoString(actor), C.GoString(target)))
+}
+
+//export LunarScenario
+func LunarScenario(dir, target *C.char) *C.char {
+	return C.CString(mobile.Scenario(C.GoString(dir), C.GoString(target)))
+}
+
+//export LunarImportSaves
+func LunarImportSaves(data, source *C.char) *C.char {
+	return C.CString(mobile.ImportSaves(C.GoString(data), C.GoString(source)))
+}
+
+//export LunarCheckMaster
+func LunarCheckMaster(path, name *C.char) *C.char {
+	return C.CString(mobile.CheckMaster(C.GoString(path), C.GoString(name)))
+}
+
+// LunarImportArchive unpacks a .7z or .zip at a path (iOS). freeBytes is the
+// free space as iOS counts it, or -1 to measure the stage's file system.
+//
+//export LunarImportArchive
+func LunarImportArchive(source, stage *C.char, freeBytes C.longlong) *C.char {
+	return C.CString(mobile.ImportArchiveFree(C.GoString(source), C.GoString(stage), int64(freeBytes)))
+}
+
+// LunarSetLogDir also keeps the server log in dir, between sessions.
+//
+//export LunarSetLogDir
+func LunarSetLogDir(dir *C.char) *C.char { return C.CString(mobile.SetLogDir(C.GoString(dir))) }
+
+// LunarLog adds a line from the launcher to the server log.
+//
+//export LunarLog
+func LunarLog(line *C.char) { log.Print(C.GoString(line)) }
+
+// LunarSetBackupDir sets where the save snapshot before an update goes (Pod Programs' snapshots).
+//
+//export LunarSetBackupDir
+func LunarSetBackupDir(dir *C.char) *C.char { return C.CString(mobile.SetBackupDir(C.GoString(dir))) }
+
+// LunarExportLogs writes a zip of the saved logs in dir and info to target.
+//
+//export LunarExportLogs
+func LunarExportLogs(dir, target, info *C.char) *C.char {
+	return C.CString(mobile.ExportLogs(C.GoString(dir), C.GoString(target), C.GoString(info)))
+}
+
+// LunarExportLogsFd is LunarExportLogs for a document the caller opened.
+//
+//export LunarExportLogsFd
+func LunarExportLogsFd(dir *C.char, fd C.int, info *C.char) *C.char {
+	return C.CString(mobile.ExportLogsFd(C.GoString(dir), int(fd), C.GoString(info)))
+}
+
+// LunarImportArchiveFd reads an archive the caller already opened (Android's
+// document picker); Android 17 does not allow reopening it by path.
+//
+//export LunarImportArchiveFd
+func LunarImportArchiveFd(fd C.int, stage *C.char) *C.char {
+	return C.CString(mobile.ImportArchiveFd(int(fd), C.GoString(stage)))
+}
+
+// LunarImportLink unpacks the game files from a link to the resource dump's
+// .7z or .zip, downloading only what it needs. freeBytes is the free space as
+// the platform counts it, or -1 to measure the stage's file system.
+//
+//export LunarImportLink
+func LunarImportLink(url, stage *C.char, freeBytes C.longlong) *C.char {
+	return C.CString(mobile.ImportLink(C.GoString(url), C.GoString(stage), int64(freeBytes)))
+}
+
+//export LunarImportProgress
+func LunarImportProgress() *C.char { return C.CString(mobile.ImportProgress()) }
+
+//export LunarCancelImport
+func LunarCancelImport() { mobile.CancelImport() }
+
+//export LunarEdit
+func LunarEdit(data, assets, request *C.char) *C.char {
+	return C.CString(mobile.Edit(C.GoString(data), C.GoString(assets), C.GoString(request)))
+}
+
+func main() {}

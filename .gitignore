@@ -1,0 +1,5 @@
+# Built and per-player files: never in the repository.
+build/
+__pycache__/
+*.pyc
+launcher/ui/game/

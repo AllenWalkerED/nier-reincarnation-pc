@@ -1,0 +1,610 @@
+package service
+
+import (
+	"database/sql"
+	"fmt"
+	"html"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"lunar-tear/server/internal/bunkercache"
+	"lunar-tear/server/internal/bunkertext"
+	"lunar-tear/server/internal/gacha"
+	"lunar-tear/server/internal/gametime"
+	"lunar-tear/server/internal/masterdata"
+	"lunar-tear/server/internal/model"
+	"lunar-tear/server/internal/store"
+	"lunar-tear/server/internal/utils"
+
+	_ "modernc.org/sqlite"
+)
+
+// archivePaths are where Bunker's Archive keeps its database, which holds the
+// game's English text (banner, costume and weapon names): Android
+// files/archive next to files/saves, iOS Library/Application Support/LunarArchive
+// beside Documents/saves. Without it, the details page shows ids instead of names.
+var archivePaths []string
+
+// SetArchiveRoot finds the Archive database from the save folder.
+func SetArchiveRoot(dataRoot string) {
+	archivePaths = []string{
+		filepath.Join(dataRoot, "..", "archive", "archive.db"),
+		filepath.Join(dataRoot, "..", "..", "Library", "Application Support", "LunarArchive", "archive.db"),
+	}
+}
+
+// gameText looks up the game's text by key, and costume assets (ch008001) by costume id.
+type gameText struct {
+	db    *sql.DB
+	lang  string            // ja, ko: names from text_local first; en or "": the active pack's, then English
+	words *bunkertext.Texts // Bunker's own words on the page: the pack's language on an English client
+
+	missions []missionName // mission names in English and lang, read once for missionText
+}
+
+func openGameText() *gameText { return openGameTextIn("en") }
+
+// openGameTextIn opens the Archive's text for pages in lang (ja, ko or en).
+func openGameTextIn(lang string) *gameText {
+	for _, p := range archivePaths {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		db, err := sql.Open("sqlite", "file:"+p+"?mode=ro")
+		if err == nil {
+			return &gameText{db: db, lang: lang, words: bunkertext.For(lang)}
+		}
+	}
+	return &gameText{lang: lang, words: bunkertext.For(lang)}
+}
+
+func (t *gameText) close() {
+	if t.db != nil {
+		t.db.Close()
+	}
+}
+
+func (t *gameText) text(key string) string {
+	if v := t.local(key); v != "" {
+		return v
+	}
+	if t.db == nil {
+		return ""
+	}
+	var v string
+	t.db.QueryRow(`SELECT value FROM text WHERE key = ?`, key).Scan(&v)
+	return v
+}
+
+func (t *gameText) costumeName(id int32) string {
+	if t.db != nil {
+		var asset string
+		if t.db.QueryRow(`SELECT asset FROM costume WHERE costume = ?`, id).Scan(&asset) == nil {
+			if name := t.text("costume.name." + asset); name != "" {
+				return name
+			}
+		}
+	}
+	return t.words.T("ingame.summons.costume_id", map[string]string{"id": strconv.Itoa(int(id))})
+}
+
+// weaponAssets maps a weapon id to its asset (wp001060), for its name.
+var weaponAssets = bunkercache.Value(func() map[int32]string {
+	assets := map[int32]string{}
+	if rows, err := utils.ReadTable[masterdata.EntityMWeapon]("m_weapon"); err == nil {
+		for _, w := range rows {
+			assets[w.WeaponId] = fmt.Sprintf("wp%03d%03d", w.WeaponType, w.AssetVariationId)
+		}
+	}
+	return assets
+})
+
+func (t *gameText) weaponName(id int32) string {
+	if a, ok := weaponAssets()[id]; ok {
+		if name := t.text("weapon.name." + a + ".1"); name != "" {
+			return name
+		}
+	}
+	return t.words.T("ingame.summons.weapon_id", map[string]string{"id": strconv.Itoa(int(id))})
+}
+
+func (t *gameText) itemName(it masterdata.GachaPoolItem) string {
+	if it.PossessionType == int32(model.PossessionTypeCostume) {
+		return t.costumeName(it.PossessionId)
+	}
+	return t.weaponName(it.PossessionId)
+}
+
+func stars(rarity int32) string {
+	switch rarity {
+	case model.RaritySSRare:
+		return "★4"
+	case model.RaritySRare:
+		return "★3"
+	case model.RarityRare:
+		return "★2"
+	}
+	return "★1"
+}
+
+func day(millis int64) string {
+	return time.UnixMilli(gametime.ToView(millis)).UTC().Format("2006/01/02") // the original-dates view
+}
+
+// openEnded is where a summon's end stands for "never": the always-open ends
+// (31 December 2099) and the placeholders a little before it.
+const openEnded = int64(4070908800000) // 2099/01/01
+
+// periodHTML is the summon's period line. A summon that never ends says so
+// rather than showing a 2099 date; a ticket summon is open while you have one.
+func periodHTML(w *bunkertext.Texts, e store.GachaCatalogEntry, ticket bool) string {
+	key := "ingame.summons.period"
+	if e.EndDatetime >= openEnded {
+		key = "ingame.summons.period_open"
+		if ticket {
+			key = "ingame.summons.period_open_ticket"
+		}
+	}
+	return "<p class=k>" + escText.Replace(w.T(key, map[string]string{"start": day(e.StartDatetime), "end": day(e.EndDatetime)})) + "</p>"
+}
+
+// eventPeriodHTML is an event summon's dates: its event's run open now,
+// else the next, else the last. The calendar can move a run's row so that it
+// ends before it starts; such a row is no run.
+func eventPeriodHTML(w *bunkertext.Texts, runs [][2]int64, now int64) string {
+	var open, next, last *[2]int64
+	for i := range runs {
+		r := &runs[i]
+		switch {
+		case r[1] < r[0]:
+			continue
+		case r[0] <= now && now < r[1]:
+			open = r
+		case r[0] > now && (next == nil || r[0] < next[0]):
+			next = r
+		case r[1] <= now && (last == nil || r[1] > last[1]):
+			last = r
+		}
+	}
+	for _, r := range []*[2]int64{open, next, last} {
+		if r != nil {
+			return "<p class=k>" + escText.Replace(w.T("ingame.summons.period_event", map[string]string{"start": day(r[0]), "end": day(r[1])})) + "</p>"
+		}
+	}
+	return "<p class=k>" + escText.Replace(w.T("ingame.summons.period_event_none", nil)) + "</p>"
+}
+
+func (t *gameText) price(p store.GachaPricePhaseEntry) string {
+	if p.Price == 0 {
+		return t.words.T("ingame.summons.free", nil)
+	}
+	switch p.PriceType {
+	case model.PriceTypeGem:
+		return t.words.Count("ingame.summons.gems", int64(p.Price), nil)
+	case model.PriceTypePaidGem:
+		return t.words.Count("ingame.summons.paid_gems", int64(p.Price), nil)
+	case model.PriceTypeConsumableItem:
+		name := t.words.T("ingame.summons.ticket", nil)
+		if n := consumableName(t, p.PriceId); n != "" {
+			name = n // each event's own tickets
+		} else if p.PriceId == model.ConsumableIdPremiumTicket {
+			if n := t.text("consumable_item.name.200002"); n != "" {
+				name = n
+			}
+		}
+		return t.words.T("ingame.summons.items", map[string]string{"n": t.words.Number(int64(p.Price)), "item": name})
+	}
+	return t.words.Number(int64(p.Price))
+}
+
+// rate is a share of the draws in percent, three decimals, the page's language's way ("12,500%").
+func (t *gameText) rate(percent float64) string {
+	return t.words.T("ingame.summons.rate", map[string]string{"rate": t.words.Decimal(percent, 3)})
+}
+
+// itemRate is one item's share of every draw, in percent.
+type itemRate struct {
+	item     masterdata.GachaPoolItem
+	percent  float64
+	featured bool
+}
+
+// bannerRates works out each item's rate the way gacha.DrawPremium picks: a
+// tier (type and rarity) by the summon rates; within a tier with featured
+// items, a featured item FeaturedPercent of the time (each featured entry
+// alike); otherwise any item of the tier's pool alike.
+func bannerRates(bp *masterdata.BannerPool) []itemRate {
+	return tierRates(bp, gacha.Rates().Tiers())
+}
+
+// slotRates are the rates of a guaranteed slot, the way gacha.DrawPremium and
+// applyGuarantee fill it: a normal roll of minRarity or better stands, a lower
+// one is rolled again among the tiers of minRarity or better; then, when the
+// guarantee names what the slot may give (candidates), anything else is
+// replaced by one of those, each alike.
+func slotRates(bp *masterdata.BannerPool, minRarity int32, candidates []masterdata.GachaPoolItem) []itemRate {
+	type key struct{ t, id int32 }
+	var high []gacha.RateTier
+	for _, t := range gacha.Rates().Tiers() {
+		if t.RarityType >= minRarity {
+			high = append(high, t)
+		}
+	}
+	rates := tierRates(bp, high) // rescaled below to 100% in all
+	total := 0.0
+	for _, r := range rates {
+		total += r.percent
+	}
+	if total == 0 {
+		return nil
+	}
+	for i := range rates {
+		rates[i].percent *= 100 / total
+	}
+	if len(candidates) == 0 {
+		return rates
+	}
+	in := map[key]bool{}
+	for _, c := range candidates {
+		in[key{c.PossessionType, c.PossessionId}] = true
+	}
+	out := rates[:0]
+	moved := 0.0
+	for _, r := range rates {
+		if in[key{r.item.PossessionType, r.item.PossessionId}] {
+			out = append(out, r)
+		} else {
+			moved += r.percent
+		}
+	}
+	have := map[key]int{}
+	for i, r := range out {
+		have[key{r.item.PossessionType, r.item.PossessionId}] = i
+	}
+	for _, c := range candidates {
+		k := key{c.PossessionType, c.PossessionId}
+		i, ok := have[k]
+		if !ok {
+			out = append(out, itemRate{item: c})
+			i = len(out) - 1
+			have[k] = i
+		}
+		out[i].percent += moved / float64(len(candidates))
+	}
+	sortRates(out)
+	return out
+}
+
+// slotMin is the rarity a phase's guaranteed slot gives at least, as
+// gacha's drawPremium raises it.
+func slotMin(p store.GachaPricePhaseEntry) int32 {
+	if g := gacha.Rates().GuaranteedRarity(); p.FixedRarityMin < g {
+		return g
+	}
+	return p.FixedRarityMin
+}
+
+// guaranteedSlot gives the slot rates when every draw of every phase is a
+// guaranteed slot of the same kind (ticket summons): then those are the
+// summon's rates.
+func guaranteedSlot(e *store.GachaCatalogEntry, bp *masterdata.BannerPool, pool *masterdata.GachaCatalog) ([]itemRate, bool) {
+	if len(e.PricePhases) == 0 {
+		return nil, false
+	}
+	first := e.PricePhases[0]
+	for _, p := range e.PricePhases {
+		if p.FixedCount <= 0 || p.FixedCount < p.DrawCount || p.FixedRarityMin != first.FixedRarityMin {
+			return nil, false
+		}
+	}
+	var candidates []masterdata.GachaPoolItem
+	if rule, ok := masterdata.PhaseRuleFor(first.PhaseId); ok && pool != nil {
+		candidates = gacha.GuaranteeCandidates(bp, pool, rule)
+	}
+	rates := slotRates(bp, slotMin(first), candidates)
+	return rates, len(rates) > 0
+}
+
+func tierRates(bp *masterdata.BannerPool, tiers []gacha.RateTier) []itemRate {
+	cfg := gacha.Rates()
+	type key struct{ t, id int32 }
+	rates := map[key]*itemRate{}
+	addRate := func(it masterdata.GachaPoolItem, p float64, featured bool) {
+		k := key{it.PossessionType, it.PossessionId}
+		r := rates[k]
+		if r == nil {
+			r = &itemRate{item: it}
+			rates[k] = r
+		}
+		r.percent += p
+		r.featured = r.featured || featured
+	}
+	for _, tier := range tiers {
+		percent := float64(tier.Weight) / 1000
+		var featured []masterdata.GachaPoolItem
+		for _, f := range bp.Featured {
+			if f.PossessionType == tier.PossessionType && f.RarityType == tier.RarityType {
+				featured = append(featured, f)
+			}
+		}
+		pool := bp.WeaponsByRarity[tier.RarityType]
+		if tier.PossessionType == int32(model.PossessionTypeCostume) {
+			pool = bp.CostumesByRarity[tier.RarityType]
+		}
+		rest := percent
+		if len(featured) > 0 {
+			share := percent * cfg.FeaturedPercent / 100
+			for _, f := range featured {
+				addRate(f, share/float64(len(featured)), true)
+			}
+			rest -= share
+		}
+		for _, it := range pool {
+			addRate(it, rest/float64(len(pool)), false)
+		}
+	}
+	out := make([]itemRate, 0, len(rates))
+	for _, r := range rates {
+		out = append(out, *r)
+	}
+	sortRates(out)
+	return out
+}
+
+func sortRates(out []itemRate) {
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.item.RarityType != b.item.RarityType {
+			return a.item.RarityType > b.item.RarityType
+		}
+		if a.featured != b.featured {
+			return a.featured
+		}
+		if a.item.PossessionType != b.item.PossessionType {
+			return a.item.PossessionType < b.item.PossessionType
+		}
+		return a.item.PossessionId < b.item.PossessionId
+	})
+}
+
+// serveGachaDetailsPage answers the banner's "Details" button
+// (/web/{lang}/gacha-details?gachaId=N): the banner's period, costs, medal
+// exchange and every item it can give, with rates from Pod Programs > Summon rates.
+func serveGachaDetailsPage(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.Atoi(r.URL.Query().Get("gachaId"))
+	var entry *store.GachaCatalogEntry
+	var bp *masterdata.BannerPool
+	var pool *masterdata.GachaCatalog
+	if bunkerHolder != nil {
+		c := bunkerHolder.Get()
+		entry, _ = resolveGachaId(c.GachaEntries, int32(id))
+		if c.GachaPool != nil && entry != nil {
+			bp = c.GachaPool.BannerPools[entry.GachaId]
+			pool = c.GachaPool
+		}
+	}
+	lang := clientLanguage(r.URL.Path)
+	t := openGameText()
+	defer t.close()
+	t.words = bunkertext.For(lang) // the pack replaces English only: other clients get English words and names
+	esc := html.EscapeString
+	words := t.words
+	say := func(key string, params map[string]string) string { return escText.Replace(words.T(key, params)) }
+
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html><html lang="` + escText.Replace(words.Language()) + `"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font:15px sans-serif;background:#d8d4c2;color:#3a372e;max-width:1000px;margin:16px auto;padding:0 16px}h1{font-size:18px;letter-spacing:.05em;margin:0 0 4px}
+h1.caps{text-transform:uppercase}
+h2{font-size:15px;letter-spacing:.1em;text-transform:uppercase;border-bottom:2px solid #8f8b7a;padding-bottom:4px;margin:20px 0 6px}
+table{border-collapse:collapse;width:100%}td{border-bottom:1px solid #a29f8f;padding:6px 4px;vertical-align:top}
+td.n{text-align:right;white-space:nowrap}.f{font-weight:bold}.k{color:#6b6758;font-size:13px}p{line-height:1.5;margin:6px 0}
+a.notice-link{display:inline-block;margin-top:4px;padding:4px 14px;background:#4b4341;color:#e6e2cf;text-decoration:none;font-size:14px}</style></head><body>`)
+	if entry == nil {
+		b.WriteString("<h1 class=caps>" + say("ingame.summons.title", nil) + "</h1><p>" + say("ingame.summons.missing", nil) + "</p></body></html>")
+		writeHTML(w, b.String())
+		return
+	}
+	title := masterdata.SummonTitle(entry.BannerAssetName)
+	if title == "" {
+		title = t.text("gacha.title." + entry.BannerAssetName)
+	}
+	if title == "" {
+		title = noticeSummonTitle(*entry)
+	}
+	if title == "" {
+		title = words.T("ingame.summons.title_id", map[string]string{"id": strconv.Itoa(int(entry.GachaId))})
+	}
+	ticket := false
+	for _, p := range entry.PricePhases {
+		ticket = ticket || (p.PriceType == model.PriceTypeConsumableItem && p.Price > 0)
+	}
+	period := periodHTML(words, *entry, ticket)
+	if _, _, ok := masterdata.EventSummonFor(entry.GachaId); ok {
+		period = eventPeriodHTML(words, masterdata.EventSummonRuns(entry.GachaId), gametime.NowMillis())
+	}
+	fmt.Fprintf(&b, "<h1>%s</h1>%s", esc(title), period)
+	b.WriteString(summonNoticeHTML(words, lang, *entry))
+
+	if len(entry.PricePhases) > 0 {
+		b.WriteString("<h2>" + say("ingame.summons.cost", nil) + "</h2><table>")
+		for _, p := range entry.PricePhases {
+			label := words.Count("ingame.summons.draws", int64(p.DrawCount), nil)
+			if p.StepNumber > 0 {
+				label = words.T("ingame.summons.step", map[string]string{"step": words.Number(int64(p.StepNumber)), "draws": label})
+			}
+			note := ""
+			if p.FixedCount > 0 && p.FixedRarityMin > 0 {
+				note = "<br><span class=k>" + escText.Replace(words.Count("ingame.summons.guaranteed", int64(p.FixedCount), map[string]string{"rarity": stars(p.FixedRarityMin)})) + "</span>"
+			}
+			if p.LimitExecCount > 0 {
+				note += "<br><span class=k>" + escText.Replace(words.Count("ingame.summons.up_to", int64(p.LimitExecCount), nil)) + "</span>"
+			}
+			fmt.Fprintf(&b, "<tr><td>%s%s</td><td class=n>%s</td></tr>", esc(label), note, esc(t.price(p)))
+		}
+		b.WriteString("</table>")
+	}
+
+	// Box summons draw only from their boxes: no premium pool rates.
+	if prizes, ok := masterdata.PrizeBoxFor(entry.GachaId); ok {
+		b.WriteString(prizeSectionHTML(r, words, entry.GachaId, prizes))
+		b.WriteString("</body></html>")
+		writeHTML(w, b.String())
+		return
+	}
+	if box, _, ok := masterdata.EventSummonFor(entry.GachaId); ok {
+		b.WriteString(eventBoxHTML(r, t, box))
+		b.WriteString("</body></html>")
+		writeHTML(w, b.String())
+		return
+	}
+
+	if entry.MedalConsumableItemId != 0 {
+		medal := words.T("ingame.summons.medals", nil)
+		if rows, err := utils.ReadTable[masterdata.EntityMConsumableItem]("m_consumable_item"); err == nil {
+			for _, c := range rows {
+				if c.ConsumableItemId == entry.MedalConsumableItemId {
+					if n := t.text(fmt.Sprintf("consumable_item.name.%d%03d", c.AssetCategoryId, c.AssetVariationId)); n != "" {
+						medal = n
+					}
+				}
+			}
+		}
+		b.WriteString("<h2>" + say("ingame.summons.exchange", nil) + "</h2>")
+		b.WriteString("<p>" + say("ingame.summons.exchange_info", map[string]string{"medal": medal}))
+		if entry.CeilingCount > 0 {
+			b.WriteString(" " + say("ingame.summons.exchange_cost", map[string]string{"n": words.Number(int64(entry.CeilingCount))}))
+		}
+		b.WriteString("</p>")
+	}
+	if len(entry.BoxContents) > 0 {
+		names := map[int32]string{}
+		for _, m := range table[masterdata.EntityMMaterial]("m_material") {
+			names[m.MaterialId] = t.text(fmt.Sprintf("material.name.%d%03d", m.AssetCategoryId, m.AssetVariationId))
+		}
+		total := int32(0)
+		for _, c := range entry.BoxContents {
+			total += c.Count
+		}
+		fmt.Fprintf(&b, "<h2>%s</h2><p class=k>%s</p><table>", say("ingame.summons.box", nil), escText.Replace(words.Count("ingame.summons.box_info", int64(total), nil)))
+		for _, c := range entry.BoxContents {
+			name := names[c.PossessionId]
+			if name == "" {
+				name = words.T("ingame.summons.material_id", map[string]string{"id": strconv.Itoa(int(c.PossessionId))})
+			}
+			class := ""
+			if c.IsTarget {
+				class = " class=f"
+			}
+			fmt.Fprintf(&b, "<tr><td%s>%s %s</td><td class=n>×%s</td></tr>", class, stars(c.RarityType), esc(name), escText.Replace(words.Number(int64(c.Count))))
+		}
+		b.WriteString("</table></body></html>")
+		writeHTML(w, b.String())
+		return
+	}
+
+	if bp == nil {
+		b.WriteString("<p>" + say("ingame.summons.own_list", nil) + "</p></body></html>")
+		writeHTML(w, b.String())
+		return
+	}
+	rates := bannerRates(bp)
+	slot, everySlot := guaranteedSlot(entry, bp, pool)
+	if everySlot {
+		rates = slot
+	}
+	var featured []string
+	for _, r := range rates {
+		if r.featured {
+			featured = append(featured, fmt.Sprintf("<tr><td class=f>%s %s</td><td class=n>%s</td></tr>", stars(r.item.RarityType), esc(t.itemName(r.item)), escText.Replace(t.rate(r.percent))))
+		}
+	}
+	if len(featured) > 0 {
+		b.WriteString("<h2>" + say("ingame.summons.featured", nil) + "</h2><table>")
+		b.WriteString(strings.Join(featured, ""))
+		b.WriteString("</table>")
+	}
+	cfg := gacha.Rates()
+	b.WriteString("<h2>" + say("ingame.summons.all_items", nil) + "</h2><p class=k>")
+	if everySlot {
+		b.WriteString(say("ingame.summons.rates_guaranteed", map[string]string{"rarity": stars(slotMin(entry.PricePhases[0]))}))
+	} else {
+		sig := func(x float64) string { return words.Significant(x, 3) }
+		b.WriteString(say("ingame.summons.rates_info", map[string]string{"r4": sig(cfg.FourStarPercent), "r3": sig(cfg.ThreeStarPercent),
+			"r2": sig(100 - cfg.FourStarPercent - cfg.ThreeStarPercent), "featured": sig(cfg.FeaturedPercent)}))
+	}
+	b.WriteString("</p><table>")
+	for _, r := range rates {
+		kind := words.T("ingame.summons.weapon", nil)
+		if r.item.PossessionType == int32(model.PossessionTypeCostume) {
+			kind = words.T("ingame.summons.costume", nil)
+		}
+		class := ""
+		if r.featured {
+			class = " class=f"
+		}
+		fmt.Fprintf(&b, "<tr><td%s>%s %s <span class=k>%s</span></td><td class=n>%s</td></tr>", class, stars(r.item.RarityType), esc(t.itemName(r.item)), escText.Replace(kind), escText.Replace(t.rate(r.percent)))
+	}
+	b.WriteString("</table></body></html>")
+	writeHTML(w, b.String())
+}
+
+func writeHTML(w http.ResponseWriter, page string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(page))
+}
+
+// serveGachaBoxPage is a box summon's "i" button (/web/<lang>/gacha/box): the
+// summon's notice when it has one, else its details. The Rates button opens
+// the same page with tab=Rate, and keeps the details with the prizes.
+func serveGachaBoxPage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("tab") != "Rate" && bunkerHolder != nil {
+		id, _ := strconv.Atoi(q.Get("gachaId"))
+		if entry, _ := resolveGachaId(bunkerHolder.Get().GachaEntries, int32(id)); entry != nil {
+			activeNoticesMu.RLock()
+			n := activeNotices
+			activeNoticesMu.RUnlock()
+			if notice := summonNotice(*entry); notice != 0 && n != nil && n.Title(notice) != "" {
+				http.Redirect(w, r, fmt.Sprintf("/%s/information/?informationId=%d&isIngame=1", webLanguage(r.URL.Path), notice), http.StatusFound)
+				return
+			}
+		}
+	}
+	serveGachaDetailsPage(w, r)
+}
+
+// noticeSummonTitle names a summon the game text has no title for by its
+// notice ("Mama's Dream Summons On Now": "Mama's Dream Summons"); "" if none.
+func noticeSummonTitle(entry store.GachaCatalogEntry) string {
+	id := summonNotice(entry)
+	activeNoticesMu.RLock()
+	n := activeNotices
+	activeNoticesMu.RUnlock()
+	if id == 0 || n == nil {
+		return ""
+	}
+	return trimNoticeTitle(n.Title(id))
+}
+
+// trimNoticeTitle is a notice title as a summon's ("… Summons On Now" and
+// "… Summons Updated" read "… Summons").
+func trimNoticeTitle(title string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(title, " On Now"), " Updated")
+}
+
+// webLanguage is the language of a /web/<lang>/... path, else English.
+// clientLanguage is the game's language in a web page's path (/web/ja/...): ja, ko or en.
+func clientLanguage(path string) string { return panelLanguage(webLanguage(path)) }
+
+func webLanguage(path string) string {
+	if parts := strings.Split(strings.TrimPrefix(path, "/"), "/"); len(parts) > 2 && parts[0] == "web" && noticePath.MatchString("/"+parts[1]+"/information/") {
+		return parts[1]
+	}
+	return "en"
+}
