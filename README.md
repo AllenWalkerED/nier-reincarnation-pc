@@ -33,7 +33,7 @@ Got a save on your phone (Bunker)? Export it there, then Settings › Saves › 
 
 * Windows 10 or 11 (64-bit)
 * A GPU that does Direct3D 11 or Vulkan
-* ~25 GB free, 16 GB RAM recommended
+* ~25 GB free, 8 GB RAM recommended
 * WebView2 (Windows 11 already has it)
 
 Plus three game files:
