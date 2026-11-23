@@ -24,8 +24,8 @@ locally, the fan-made server that brought the game back. Nothing leaves your PC.
 
 ## Download
 
-Grab `NieR-Reincarnation-PC-v1.1.zip` from [Releases](../../releases). Already on 1.0? Unzip it over
-your game folder, your saves and settings stay.
+Grab `NieR-Reincarnation-PC-v1.2.zip` from [Releases](../../releases). Already playing an older version?
+Unzip it over your game folder, your saves and settings stay.
 
 Got a save on your phone (Bunker)? Export it there, then Settings › Saves › **Import from phone**.
 
@@ -92,7 +92,8 @@ people have put long sessions into it.
 * **Bug report:** Settings › System › **Export logs**, then open an issue and attach the zip. It leaves
   out your Windows username and PC name.
 
-Known quirks: a few controller buttons do double duty on different screens, and it's Windows only.
+Known quirks: a few controller buttons do double duty on different screens, and it's Windows only for
+now. A Mac version is in the works.
 
 ## Building
 
