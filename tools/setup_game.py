@@ -186,7 +186,18 @@ def step_client(args, root: Path):
     say("progress", "60")
     r = subprocess.run([py, str(HERE / "hide_slidepad.py"), str(tmp)], capture_output=True, text=True)
     if r.returncode != 0:
-        fail("Hiding the touch stick failed: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+        # Only a picture: the game is ready without it. The APK goes back to how it
+        # was before (hide_slidepad keeps a copy), and the full error goes to the logs.
+        backup = tmp.with_name(tmp.name + ".slidepad.orig")
+        if backup.is_file():
+            os.replace(backup, tmp)
+        logs = root / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "setup-slidepad.log").write_text(
+            f"python: {py}\nsys.path: {sys.path}\n\nstdout:\n{r.stdout}\n\nstderr:\n{r.stderr}\n", encoding="utf-8")
+        last = (r.stderr.strip().splitlines() or ["?"])[-1]
+        say("note", f"The touch stick stays visible (hiding it failed: {last}; details in logs\\setup-slidepad.log). "
+                    "The game works the same.")
     for leftover in tmp.parent.glob(tmp.name + ".*"):
         leftover.unlink()
     for leftover in tmp.parent.glob("tmp*"):  # the patchers' work folders, released now
