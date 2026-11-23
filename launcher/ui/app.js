@@ -130,6 +130,7 @@ native && native.addEventListener("message", (e) => {
   const [kind, ...rest] = msg.split(":");
   const text = rest.join(":");
   if (kind === "settings") {
+    freshSettings = !text;  // no settings.json yet: the first start on this PC
     try { settings = merge(DEFAULTS, text ? JSON.parse(text) : {}); } catch { settings = structuredClone(DEFAULTS); }
     if ((settings.version || 1) < 2) settings.controls.move.radius = DEFAULTS.controls.move.radius;  // v2: a longer run drag
     if (!["vulkan", "d3d11", "swiftshader"].includes(settings.graphics.backend)) {  // not a renderer of this version
@@ -164,7 +165,9 @@ native && native.addEventListener("message", (e) => {
     }
     render();
   } else if (kind === "info") {
-    const info = JSON.parse(text || "{}");
+    let info;
+    try { info = JSON.parse(text || "{}"); } catch { return; }  // a broken message changes nothing
+    try { autoForGpu(info); } catch (e) { console.warn("GPU choice:", e); }
     document.body.classList.toggle("setup", !info.ready);
     if (!info.ready) return;
     const files = document.getElementById("files");
@@ -364,8 +367,52 @@ playButton.addEventListener("click", () => {
 });
 document.getElementById("quit").addEventListener("click", () => send("quit"));
 
+// ---- the GPU: chosen for this PC ------------------------------------------------------
+// From the graphics cards Windows lists (NieR.exe's "info"): NVIDIA first, then an AMD
+// or Intel card with its own memory, then the integrated one. On the first start the
+// settings also suit the card: a graphics card gets Best (1080p, every effect) at 60
+// fps, integrated graphics Medium (540p, no effects) at 30. Later starts only correct
+// a GPU choice that names a maker this PC does not have.
+let freshSettings = false;
+let gpuChecked = false;
+const VENDOR = { nvidia: 0x10de, amd: 0x1002, intel: 0x8086 };
+function pickGpu(gpus) {
+  const by = (v) => gpus.filter((g) => g.vendor === v).sort((a, b) => b.vram - a.vram)[0];
+  const nv = by(VENDOR.nvidia), amd = by(VENDOR.amd), intel = by(VENDOR.intel);
+  const discrete = (g) => g && g.vram >= 2048;
+  if (nv) return { adapter: "nvidia", gpu: nv, discrete: true };
+  if (discrete(amd)) return { adapter: "amd", gpu: amd, discrete: true };
+  if (discrete(intel)) return { adapter: "intel", gpu: intel, discrete: true };
+  if (amd) return { adapter: "amd", gpu: amd, discrete: false };
+  if (intel) return { adapter: "intel", gpu: intel, discrete: false };
+  return null;
+}
+function autoForGpu(info) {
+  if (gpuChecked || !Array.isArray(info.gpus) || !info.gpus.length) return;
+  gpuChecked = true;
+  const pick = pickGpu(info.gpus);
+  if (!pick) return;
+  const g = settings.graphics;
+  const present = (a) => a === "" || info.gpus.some((x) => x.vendor === VENDOR[a]);
+  let note = "";
+  if (freshSettings) {
+    g.adapter = pick.adapter;
+    g.quality = pick.discrete ? "1" : "3";
+    settings.performance.fps = pick.discrete ? "60" : "30";
+    note = `Set for ${pick.gpu.name}: ${pick.discrete ? "Best quality at 60 fps" : "Medium quality at 30 fps (integrated graphics)"}. Change it in Settings.`;
+  } else if (!present(g.adapter)) {
+    g.adapter = pick.adapter;
+    note = `GPU set to ${pick.gpu.name}: the card chosen before is not in this PC.`;
+  }
+  if (note) {
+    save();
+    render();
+    setStatus(note);
+  }
+}
+
 // ---- updates: the newest release on GitHub --------------------------------------------
-const VERSION = "1.1";
+const VERSION = "1.2";
 const LATEST = "https://api.github.com/repos/AllenWalkerED/nier-reincarnation-pc/releases/latest";
 const newer = (a, b) => {  // is version a newer than b ("1.10" > "1.9")
   const x = a.split(".").map(Number), y = b.split(".").map(Number);

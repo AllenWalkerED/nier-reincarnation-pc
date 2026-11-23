@@ -713,6 +713,32 @@ std::string system_report() {
     return r.str();
 }
 
+// The graphics cards for the page (its automatic choice of GPU and settings):
+// [{"name","vendor","vram" (dedicated MB)}], software adapters left out.
+std::wstring gpus_json() {
+    std::wstring out = L"[";
+    IDXGIFactory1* factory = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        IDXGIAdapter1* adapter = nullptr;
+        bool first = true;
+        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 d;
+            if (SUCCEEDED(adapter->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.VendorId != 0x1414) {
+                std::wstring name;
+                for (const wchar_t* c = d.Description; *c; ++c)
+                    if (*c != L'"' && *c != L'\\' && *c >= 32) name += *c;
+                if (!first) out += L",";
+                first = false;
+                out += L"{\"name\":\"" + name + L"\",\"vendor\":" + std::to_wstring(d.VendorId) +
+                       L",\"vram\":" + std::to_wstring(d.DedicatedVideoMemory >> 20) + L"}";
+            }
+            adapter->Release();
+        }
+        factory->Release();
+    }
+    return out + L"]";
+}
+
 // Copies `src` to `dst` with the names replaced; false when there is no `src`.
 bool stage_text(const std::wstring& src, const std::wstring& dst) {
     if (!exists(src)) return false;
@@ -865,8 +891,11 @@ void on_page_message(const std::wstring& msg) {
             const unsigned long long size = (static_cast<unsigned long long>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
             save = size >= (1ull << 20) ? std::to_wstring(size >> 20) + L" MB" : std::to_wstring(size >> 10) + L" KB";
         }
+        MEMORYSTATUSEX mem{sizeof(mem)};
+        GlobalMemoryStatusEx(&mem);
         to_page(L"info:{\"files\":" + std::wstring(files ? L"true" : L"false") + L",\"save\":\"" + save +
-                L"\",\"ready\":" + std::wstring(setup_ready() ? L"true" : L"false") + L"}");
+                L"\",\"ready\":" + std::wstring(setup_ready() ? L"true" : L"false") +
+                L",\"ram\":" + std::to_wstring(mem.ullTotalPhys >> 20) + L",\"gpus\":" + gpus_json() + L"}");
     } else if (cmd == L"logs") {
         ShellExecuteW(nullptr, L"open", path(L"logs").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     } else if (cmd == L"export-logs") {

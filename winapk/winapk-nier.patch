@@ -14052,7 +14052,7 @@ index db6f647..27f25d4 100644
 +};
 +const unsigned gl_stub_count = sizeof(gl_stub_table) / sizeof(gl_stub_table[0]);
 diff --git a/windows/host/gl/gl_surface.cpp b/windows/host/gl/gl_surface.cpp
-index 6119fb4..6d2a518 100644
+index 6119fb4..d2a010f 100644
 --- a/windows/host/gl/gl_surface.cpp
 +++ b/windows/host/gl/gl_surface.cpp
 @@ -2,17 +2,27 @@
@@ -14091,7 +14091,7 @@ index 6119fb4..6d2a518 100644
  bool g_tried = false;
  std::mutex g_init_lock;
  
-@@ -35,15 +46,362 @@ struct ViewSurface {
+@@ -35,15 +46,370 @@ struct ViewSurface {
  std::map<long long, ViewSurface> g_surfaces;
  int g_cur_w = 0, g_cur_h = 0;
  
@@ -14110,17 +14110,25 @@ index 6119fb4..6d2a518 100644
 +    auto create = dxgi ? reinterpret_cast<Create>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
 +    IDXGIFactory1* factory = nullptr;
 +    if (!create || FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) return false;
++    // Of that maker's adapters, the one with the most memory of its own: a PC
++    // with an integrated and a discrete GPU of one maker (a Ryzen APU and a
++    // Radeon card, Intel graphics and an Arc card) lists the integrated first.
 +    bool found = false;
++    SIZE_T best = 0;
++    wchar_t name[128] = {};
 +    IDXGIAdapter1* adapter = nullptr;
-+    for (UINT i = 0; !found && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
++    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
 +        DXGI_ADAPTER_DESC1 desc;
-+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == vendor) {
++        if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == vendor &&
++            !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && (!found || desc.DedicatedVideoMemory > best)) {
 +            *luid = desc.AdapterLuid;
++            best = desc.DedicatedVideoMemory;
 +            found = true;
-+            std::fprintf(stderr, "[win.apk] GL: ANGLE on adapter %ls (WINAPK_ANGLE_ADAPTER=%s)\n", desc.Description, want);
++            wcsncpy(name, desc.Description, 127);
 +        }
 +        adapter->Release();
 +    }
++    if (found) std::fprintf(stderr, "[win.apk] GL: ANGLE on adapter %ls (WINAPK_ANGLE_ADAPTER=%s)\n", name, want);
 +    factory->Release();
 +    if (!found) std::fprintf(stderr, "[win.apk] GL: no adapter matches WINAPK_ANGLE_ADAPTER=%s\n", want);
 +    return found;
@@ -14455,7 +14463,7 @@ index 6119fb4..6d2a518 100644
      EGLDisplay d = get(kPlatformAngle, EGL_DEFAULT_DISPLAY, attribs);
      if (d == EGL_NO_DISPLAY) return d;
      EGLint major = 0, minor = 0;
-@@ -65,10 +423,29 @@ bool init() {
+@@ -65,10 +431,29 @@ bool init() {
      // A GPU first, then Direct3D's software rasterizer (WARP, part of every
      // Windows), then ANGLE's own (SwiftShader).
      const char* used = "Direct3D 11";
@@ -14486,7 +14494,7 @@ index 6119fb4..6d2a518 100644
      }
      if (g_display == EGL_NO_DISPLAY && !want_hw) {
          g_display = open_display(kTypeVulkan, kDeviceSwiftShader);
-@@ -163,6 +540,34 @@ void gl_read_current(std::vector<uint32_t>* argb, int W, int H) {
+@@ -163,6 +548,34 @@ void gl_read_current(std::vector<uint32_t>* argb, int W, int H) {
  
  void* gl_shared_display() { return init() ? g_display : nullptr; }
  
@@ -14561,7 +14569,7 @@ index b48d496..5577214 100644
  // first (gl_frame_read without the framework's context). Any thread with a
  // current context.
 diff --git a/windows/host/gl/guest_gl.cpp b/windows/host/gl/guest_gl.cpp
-index a200045..4849f3f 100644
+index a200045..5290830 100644
 --- a/windows/host/gl/guest_gl.cpp
 +++ b/windows/host/gl/guest_gl.cpp
 @@ -20,8 +20,11 @@
@@ -14601,7 +14609,30 @@ index a200045..4849f3f 100644
  
  typedef khronos_int32_t GLclampx;
  
-@@ -168,6 +183,73 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglTerminate(EGLDisplay dpy) {
+@@ -44,6 +59,22 @@ namespace winapk::host {
+ 
+ namespace {
+ 
++// What the app drew to the screen this frame: the largest viewport it set while
++// the default framebuffer was bound, from the bottom-left corner. An app that
++// still draws at an older, smaller size after the window grew (a size change
++// it was not told about in time) leaves its picture in the bottom-left corner;
++// the swap then stretches that corner over the window (scale_to_window).
++thread_local bool t_default_fb = true;
++thread_local GLsizei t_screen_w = 0, t_screen_h = 0;
++void note_bind_framebuffer(GLenum target, GLuint fb) {
++    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) t_default_fb = fb == 0;
++}
++void note_viewport(GLint x, GLint y, GLsizei w, GLsizei h) {
++    if (!t_default_fb || x != 0 || y != 0) return;
++    if (w > t_screen_w) t_screen_w = w;
++    if (h > t_screen_h) t_screen_h = h;
++}
++
+ #include "gl/guest_gl.inc"
+ 
+ constexpr EGLint kRecordableAndroid = 0x3142, kFramebufferTargetAndroid = 0x3147;
+@@ -168,6 +199,73 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglTerminate(EGLDisplay dpy) {
      return dpy == shared_display() ? EGL_TRUE : eglTerminate(dpy);
  }
  
@@ -14675,7 +14706,7 @@ index a200045..4849f3f 100644
  WINAPK_GUEST_ABI EGLBoolean guest_eglChooseConfig(EGLDisplay dpy, const EGLint* attribs, EGLConfig* configs,
                                                    EGLint size, EGLint* count) {
      std::vector<EGLint> a;
-@@ -177,7 +259,10 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglChooseConfig(EGLDisplay dpy, const EGLint*
+@@ -177,7 +275,10 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglChooseConfig(EGLDisplay dpy, const EGLint*
          EGLint value = p[1];
          if (p[0] == EGL_SURFACE_TYPE) {
              surface_type = true;
@@ -14687,7 +14718,7 @@ index a200045..4849f3f 100644
          }
          a.push_back(p[0]);
          a.push_back(value);
-@@ -185,18 +270,47 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglChooseConfig(EGLDisplay dpy, const EGLint*
+@@ -185,18 +286,47 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglChooseConfig(EGLDisplay dpy, const EGLint*
      // EGL_SURFACE_TYPE defaults to EGL_WINDOW_BIT.
      if (!surface_type) {
          a.push_back(EGL_SURFACE_TYPE);
@@ -14736,7 +14767,7 @@ index a200045..4849f3f 100644
      const int side = side_for(w, h, 0);
      const EGLint attribs[] = {EGL_WIDTH, side, EGL_HEIGHT, side, EGL_NONE};
      EGLSurface s = eglCreatePbufferSurface(dpy, config, attribs);
-@@ -227,6 +341,11 @@ WINAPK_GUEST_ABI EGLSurface guest_eglCreatePlatformWindowSurfaceEXT(EGLDisplay d
+@@ -227,6 +357,11 @@ WINAPK_GUEST_ABI EGLSurface guest_eglCreatePlatformWindowSurfaceEXT(EGLDisplay d
  }
  
  WINAPK_GUEST_ABI EGLBoolean guest_eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
@@ -14748,7 +14779,7 @@ index a200045..4849f3f 100644
      {
          std::lock_guard<std::mutex> hold(g_lock);
          auto it = g_window_surfaces.find(surface);
-@@ -245,8 +364,19 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw
+@@ -245,8 +380,19 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw
      std::lock_guard<std::mutex> hold(g_lock);
      auto d = g_window_surfaces.find(draw), r = g_window_surfaces.find(read);
      if (d != g_window_surfaces.end() && ctx != EGL_NO_CONTEXT) grow(dpy, draw, d->second);
@@ -14770,7 +14801,7 @@ index a200045..4849f3f 100644
  }
  
  WINAPK_GUEST_ABI EGLSurface guest_eglGetCurrentSurface(EGLint readdraw) {
-@@ -270,21 +400,777 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglCopyBuffers(EGLDisplay dpy, EGLSurface surf
+@@ -270,21 +416,799 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglCopyBuffers(EGLDisplay dpy, EGLSurface surf
      return eglCopyBuffers(dpy, real_of(surface), target);
  }
  
@@ -15501,13 +15532,35 @@ index a200045..4849f3f 100644
 +                eglQuerySurface(dpy, surface, EGL_HEIGHT, &d);
 +                if (told++ % 300 == 0) std::fprintf(stderr, "[win.apk] direct swap: window %p buffer %dx%d (%d) surface %dx%d\n", direct_window, a, b, has, c, d);
 +            }
++            bool sized = false;
 +            if (direct_window && native_window_buffer_size(direct_window, &bw, &bh) &&
 +                eglQuerySurface(dpy, surface, EGL_WIDTH, &ww) && eglQuerySurface(dpy, surface, EGL_HEIGHT, &wh) &&
 +                bw > 0 && bh > 0 && bw <= ww && bh <= wh) {
++                sized = true;
 +                if (!(fxaa_on() && fxaa_present(bw, bh, ww, wh)) && (bw < ww || bh < wh) &&
 +                    !upscale_present(bw, bh, ww, wh))
 +                    scale_to_window(bw, bh, ww, wh);
 +            }
++            // No buffer size from the app, but it drew this frame in a smaller
++            // corner than the surface: stretch that corner (see note_viewport).
++            // WINAPK_CORNER_FIX=0 turns it off.
++            static const bool corner_fix = [] {
++                const char* e = std::getenv("WINAPK_CORNER_FIX");
++                return !(e && std::strcmp(e, "0") == 0);
++            }();
++            if (corner_fix && direct_window && !sized && t_screen_w > 0 && t_screen_h > 0 &&
++                eglQuerySurface(dpy, surface, EGL_WIDTH, &ww) && eglQuerySurface(dpy, surface, EGL_HEIGHT, &wh) &&
++                t_screen_w <= ww && t_screen_h <= wh && (t_screen_w < ww || t_screen_h < wh) &&
++                t_screen_w >= 64 && t_screen_h >= 64) {
++                static std::atomic<int> told{0};
++                if (told++ % 600 == 0)
++                    std::fprintf(stderr, "[win.apk] the app drew %dx%d in a %dx%d window: stretched to fill it\n",
++                                 static_cast<int>(t_screen_w), static_cast<int>(t_screen_h), ww, wh);
++                if (!(fxaa_on() && fxaa_present(t_screen_w, t_screen_h, ww, wh)) &&
++                    !upscale_present(t_screen_w, t_screen_h, ww, wh))
++                    scale_to_window(t_screen_w, t_screen_h, ww, wh);
++            }
++            t_screen_w = t_screen_h = 0;  // the next frame's own
 +            if (direct_window) guest_frame_direct();
 +            game_effects_poll();
 +            if (vsync_override() >= 0) {
@@ -15550,7 +15603,7 @@ index a200045..4849f3f 100644
      guest_frame_present(argb.data(), w, h);
      // The window outgrew the pbuffer (this frame was read from the part that
      // fits): the next frame gets one that holds it.
-@@ -313,8 +1199,25 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglQuerySurface(EGLDisplay dpy, EGLSurface sur
+@@ -313,8 +1237,25 @@ WINAPK_GUEST_ABI EGLBoolean guest_eglQuerySurface(EGLDisplay dpy, EGLSurface sur
          int w = 0, h = 0;
          window_size(ws, &w, &h);
          *value = attribute == EGL_WIDTH ? w : h;
@@ -15577,7 +15630,7 @@ index a200045..4849f3f 100644
  }
  
 diff --git a/windows/host/gl/guest_gl.inc b/windows/host/gl/guest_gl.inc
-index a788b04..c0f4e7f 100644
+index a788b04..99788cb 100644
 --- a/windows/host/gl/guest_gl.inc
 +++ b/windows/host/gl/guest_gl.inc
 @@ -88,6 +88,201 @@ extern "C" void GL_APIENTRY glTranslatef(GLfloat x, GLfloat y, GLfloat z);
@@ -15829,7 +15882,15 @@ index a788b04..c0f4e7f 100644
  WINAPK_GUEST_ABI EGLBoolean guest_eglWaitClient(void) { return eglWaitClient(); }
  WINAPK_GUEST_ABI EGLBoolean guest_eglWaitGL(void) { return eglWaitGL(); }
  WINAPK_GUEST_ABI EGLBoolean guest_eglWaitNative(EGLint engine) { return eglWaitNative(engine); }
-@@ -143,7 +367,45 @@ WINAPK_GUEST_ABI void guest_glBindProgramPipelineEXT(GLuint pipeline) { glBindPr
+@@ -136,14 +360,52 @@ WINAPK_GUEST_ABI void guest_glBindBufferBase(GLenum target, GLuint index, GLuint
+ WINAPK_GUEST_ABI void guest_glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) { glBindBufferRange(target, index, buffer, offset, size); }
+ WINAPK_GUEST_ABI void guest_glBindFragDataLocationEXT(GLuint program, GLuint color, const GLchar *name) { glBindFragDataLocationEXT(program, color, name); }
+ WINAPK_GUEST_ABI void guest_glBindFragDataLocationIndexedEXT(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) { glBindFragDataLocationIndexedEXT(program, colorNumber, index, name); }
+-WINAPK_GUEST_ABI void guest_glBindFramebuffer(GLenum target, GLuint framebuffer) { glBindFramebuffer(target, framebuffer); }
++WINAPK_GUEST_ABI void guest_glBindFramebuffer(GLenum target, GLuint framebuffer) { note_bind_framebuffer(target, framebuffer); glBindFramebuffer(target, framebuffer); }  // hand-written: see note_viewport
+ WINAPK_GUEST_ABI void guest_glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) { glBindImageTexture(unit, texture, level, layered, layer, access, format); }
+ WINAPK_GUEST_ABI void guest_glBindProgramPipeline(GLuint pipeline) { glBindProgramPipeline(pipeline); }
+ WINAPK_GUEST_ABI void guest_glBindProgramPipelineEXT(GLuint pipeline) { glBindProgramPipelineEXT(pipeline); }
  WINAPK_GUEST_ABI void guest_glBindRenderbuffer(GLenum target, GLuint renderbuffer) { glBindRenderbuffer(target, renderbuffer); }
  WINAPK_GUEST_ABI void guest_glBindSampler(GLuint unit, GLuint sampler) { glBindSampler(unit, sampler); }
  WINAPK_GUEST_ABI void guest_glBindShadingRateImageNV(GLuint texture) { glBindShadingRateImageNV(texture); }
@@ -16504,6 +16565,15 @@ index a788b04..c0f4e7f 100644
  WINAPK_GUEST_ABI void guest_glTexSubImage3DOES(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels) { glTexSubImage3DOES(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels); }
  WINAPK_GUEST_ABI void guest_glTextureAttachMemoryNV(GLuint texture, GLuint memory, GLuint64 offset) { glTextureAttachMemoryNV(texture, memory, offset); }
  WINAPK_GUEST_ABI void guest_glTextureBarrierNV(void) { glTextureBarrierNV(); }
+@@ -1086,7 +1602,7 @@ WINAPK_GUEST_ABI void guest_glVertexAttribIPointer(GLuint index, GLint size, GLe
+ WINAPK_GUEST_ABI void guest_glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer) { glVertexAttribPointer(index, size, type, normalized, stride, pointer); }
+ WINAPK_GUEST_ABI void guest_glVertexBindingDivisor(GLuint bindingindex, GLuint divisor) { glVertexBindingDivisor(bindingindex, divisor); }
+ WINAPK_GUEST_ABI void guest_glVertexPointer(GLint size, GLenum type, GLsizei stride, const void *pointer) { glVertexPointer(size, type, stride, pointer); }
+-WINAPK_GUEST_ABI void guest_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) { glViewport(x, y, width, height); }
++WINAPK_GUEST_ABI void guest_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) { note_viewport(x, y, width, height); glViewport(x, y, width, height); }  // hand-written: see note_viewport
+ WINAPK_GUEST_ABI void guest_glViewportArrayvNV(GLuint first, GLsizei count, const GLfloat *v) { glViewportArrayvNV(first, count, v); }
+ WINAPK_GUEST_ABI void guest_glViewportArrayvOES(GLuint first, GLsizei count, const GLfloat *v) { glViewportArrayvOES(first, count, v); }
+ WINAPK_GUEST_ABI void guest_glViewportIndexedfNV(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) { glViewportIndexedfNV(index, x, y, w, h); }
 diff --git a/windows/host/native_cocoa.cpp b/windows/host/native_cocoa.cpp
 index e559cc3..1c00aee 100644
 --- a/windows/host/native_cocoa.cpp
@@ -22286,7 +22356,7 @@ index 93b72ed..e2d2f09 100644
 +    return b.result;
 +}
 diff --git a/windows/host/win32_window.cpp b/windows/host/win32_window.cpp
-index 4bb79b9..8d3a890 100644
+index 4bb79b9..b04ada2 100644
 --- a/windows/host/win32_window.cpp
 +++ b/windows/host/win32_window.cpp
 @@ -8,11 +8,16 @@
@@ -22388,7 +22458,7 @@ index 4bb79b9..8d3a890 100644
  }
  
  int meta_state() {
-@@ -644,7 +661,775 @@ bool started_without_activation() {
+@@ -644,7 +661,777 @@ bool started_without_activation() {
      }
  }
  
@@ -23128,6 +23198,7 @@ index 4bb79b9..8d3a890 100644
 +// follows the new size, as when the user resizes the window.
 +void set_fullscreen(HWND hwnd, bool on) {
 +    if (on == g_fullscreen) return;
++    g_fitting = true;  // the passing sizes of the style change do not reach the app
 +    if (on) {
 +        if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
 +        GetWindowRect(hwnd, &g_windowed_rect);
@@ -23152,6 +23223,7 @@ index 4bb79b9..8d3a890 100644
 +            fit_window(hwnd, mon, window_dpi(hwnd), nullptr, true);
 +        }
 +    }
++    g_fitting = false;
 +    follow_client(hwnd);
 +    place_game_child(hwnd);
 +    InvalidateRect(hwnd, nullptr, FALSE);
@@ -23164,7 +23236,7 @@ index 4bb79b9..8d3a890 100644
      switch (msg) {
          case WM_PAINT:
              paint(hwnd);
-@@ -657,6 +1442,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -657,6 +1444,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              // active window: SetFocus would activate an inactive one.
              if (GetActiveWindow() == hwnd && GetFocus() != hwnd) SetFocus(hwnd);
              if (!on_phone(hwnd, lp)) return 0;  // a letterbox bar: nothing of the app is there
@@ -23172,7 +23244,7 @@ index 4bb79b9..8d3a890 100644
              SetCapture(hwnd);
              g_pointer_down = true;
              send_pointer(hwnd, 0, lp);
-@@ -686,11 +1472,20 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -686,11 +1474,20 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
          case WM_KEYDOWN:
          case WM_SYSKEYDOWN:
              if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;  // Alt+F4 closes, as everywhere
@@ -23193,7 +23265,7 @@ index 4bb79b9..8d3a890 100644
              send_key(0, wp, lp);
              return 0;
          case WM_KEYUP:
-@@ -699,6 +1494,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -699,6 +1496,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                  g_input->key(1, 4, 0, 0);
                  return 0;
              }
@@ -23203,7 +23275,7 @@ index 4bb79b9..8d3a890 100644
              send_key(1, wp, lp);
              return 0;
          // The mouse's back side button is Back too.
-@@ -776,6 +1574,21 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -776,6 +1576,27 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              static bool shown = false;
              const bool first = !shown;
              shown = true;
@@ -23214,10 +23286,16 @@ index 4bb79b9..8d3a890 100644
 +                MONITORINFO mi{};
 +                mi.cbSize = sizeof(mi);
 +                GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
++                // Only the final size goes to the app: the style change sends
++                // WM_SIZE with a passing size first, which the app would take
++                // as its display (it then drew a 360x240 frame in the corner
++                // until the next size reached it, seconds later on a slow PC).
++                g_fitting = true;
 +                SetWindowLongPtrW(hwnd, GWL_STYLE, (GetWindowLongPtrW(hwnd, GWL_STYLE) & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
 +                const RECT m = mi.rcMonitor;
 +                SetWindowPos(hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
 +                             SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
++                g_fitting = false;
 +                follow_client(hwnd);
 +                place_game_child(hwnd);
 +                std::fprintf(stderr, "[win.apk] full screen: %ldx%ld\n", m.right - m.left, m.bottom - m.top);
@@ -23225,7 +23303,7 @@ index 4bb79b9..8d3a890 100644
              if ((first && !started_without_activation()) || (!first && foreground_is_ours())) {
                  // Every activity the app starts shows the window again;
                  // SW_SHOWNORMAL would take a maximized window out of it.
-@@ -803,7 +1616,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -803,7 +1624,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              // shape (a portrait column becomes the full width for landscape)
              // and the app follows it. Otherwise the window takes the phone's
              // shape.
@@ -23235,7 +23313,7 @@ index 4bb79b9..8d3a890 100644
                  follow_client(hwnd);
                  InvalidateRect(hwnd, nullptr, FALSE);
              } else {
-@@ -818,6 +1632,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -818,6 +1640,14 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              SetTimer(hwnd, kTestResizeTimer, 1000, nullptr);
              return 0;
          case WM_TIMER:
@@ -23250,7 +23328,7 @@ index 4bb79b9..8d3a890 100644
              if (wp == kTestResizeTimer) {
                  KillTimer(hwnd, kTestResizeTimer);
                  wchar_t buf[64];
-@@ -837,6 +1659,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+@@ -837,6 +1667,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              g_input->close_requested();
              return 0;
          case WM_SIZE: {
@@ -23258,7 +23336,7 @@ index 4bb79b9..8d3a890 100644
              // BACK at the task root minimizes the window (moveTaskToBack) and
              // stops the top activity; un-minimizing must resume it, or every
              // touch after that goes to no activity at all.
-@@ -882,6 +1705,23 @@ DWORD WINAPI ui_thread(void* param) {
+@@ -882,6 +1713,23 @@ DWORD WINAPI ui_thread(void* param) {
      wc.lpfnWndProc = window_proc;
      wc.hInstance = GetModuleHandleW(nullptr);
      wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW
@@ -23282,15 +23360,35 @@ index 4bb79b9..8d3a890 100644
      wc.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));  // IDI_APPLICATION
      wc.lpszClassName = kClassName;
      RegisterClassExW(&wc);
-@@ -906,6 +1746,7 @@ DWORD WINAPI ui_thread(void* param) {
+@@ -905,7 +1753,27 @@ DWORD WINAPI ui_thread(void* param) {
+         }
          fit_window(g_hwnd, g_plan.monitor ? g_plan.monitor : MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST),
                     window_dpi(g_hwnd), &wr, true);
++        // Full screen from the start, while still hidden: the app's first display
++        // is the monitor. Made full screen only at the first show, the window
++        // first took the app's orientation at phone size (360x240 dp), which the
++        // app queued for its surface and drew its first frames at, in the corner
++        // of the screen, until the monitor's size reached it seconds later (or
++        // never, when that update was lost).
++        if (g_fullscreen) {
++            MONITORINFO mi{};
++            mi.cbSize = sizeof(mi);
++            GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
++            const RECT m = mi.rcMonitor;
++            g_fitting = true;
++            SetWindowLongPtrW(g_hwnd, GWL_STYLE, (GetWindowLongPtrW(g_hwnd, GWL_STYLE) & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
++            SetWindowPos(g_hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
++                         SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
++            g_fitting = false;
++            follow_client(g_hwnd);
++            std::fprintf(stderr, "[win.apk] full screen from the start: %ldx%ld\n", m.right - m.left, m.bottom - m.top);
++        }
      }
 +    if (g_hwnd) start_input_map(g_hwnd);
      args->ok = g_hwnd != nullptr;
      SetEvent(args->ready);
      if (!g_hwnd) return 1;
-@@ -1125,6 +1966,12 @@ void window_set_orientation_lock(int lock) { g_orientation_lock = lock; }
+@@ -1125,6 +1993,12 @@ void window_set_orientation_lock(int lock) { g_orientation_lock = lock; }
  
  void* window_handle() { return g_hwnd; }
  
@@ -23303,7 +23401,7 @@ index 4bb79b9..8d3a890 100644
  bool window_phone_rect(int* x, int* y, int* w, int* h) {
      if (!g_hwnd) return false;
      const RECT r = client_app_rect(g_hwnd);
-@@ -1237,3 +2084,7 @@ int android_key_code(unsigned vk, wchar_t ch) {
+@@ -1237,3 +2111,7 @@ int android_key_code(unsigned vk, wchar_t ch) {
  }
  
  }  // namespace winapk::host
