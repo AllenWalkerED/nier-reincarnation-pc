@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const termsVersionMarker = "###123###"
@@ -179,11 +180,46 @@ func (s *OctoHTTPServer) listBinPath(revision, platform string) string {
 	return filepath.Join(s.BaseDir, "assets", "revisions", revision, "list.bin")
 }
 
+// DownloadLog: "1" logs every asset bundle and master data download (path,
+// status, bytes, time). Off by default (thousands of lines a session); set at
+// build time for a diagnostic server (-ldflags "-X lunar-tear/server/internal/service.DownloadLog=1")
+// or with NIER_DOWNLOAD_LOG=1.
+var DownloadLog = ""
+
+type countingWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (c *countingWriter) WriteHeader(code int) { c.status = code; c.ResponseWriter.WriteHeader(code) }
+func (c *countingWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	n, err := c.ResponseWriter.Write(b)
+	c.bytes += int64(n)
+	return n, err
+}
+
 func (s *OctoHTTPServer) handleAll(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-	platform := platformFromUserAgent(r)
 	isAssetRequest := strings.Contains(path, "/unso-")
 	isMasterDataRequest := strings.Contains(path, "/assets/release/") && strings.Contains(path, "database.bin")
+	if (isAssetRequest || isMasterDataRequest) && (DownloadLog == "1" || os.Getenv("NIER_DOWNLOAD_LOG") == "1") {
+		start := time.Now()
+		cw := &countingWriter{ResponseWriter: w}
+		log.Printf("[Download] %s %s (range %q)", r.Method, path, r.Header.Get("Range"))
+		defer func() {
+			log.Printf("[Download] done %s -> %d, %d bytes, %d ms", path, cw.status, cw.bytes, time.Since(start).Milliseconds())
+		}()
+		w = cw
+	}
+	s.handleAllInner(w, r, path, isAssetRequest, isMasterDataRequest)
+}
+
+func (s *OctoHTTPServer) handleAllInner(w http.ResponseWriter, r *http.Request, path string, isAssetRequest, isMasterDataRequest bool) {
+	platform := platformFromUserAgent(r)
 	if !isAssetRequest && !isMasterDataRequest {
 		log.Printf("[HTTP] %s %s (Host: %s, platform: %s)", r.Method, r.URL.String(), r.Host, platform)
 		for k, v := range r.Header {
