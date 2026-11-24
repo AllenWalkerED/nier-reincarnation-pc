@@ -66,14 +66,31 @@ def sha256(path: Path, label: str) -> str:
     return h.hexdigest()
 
 
-def junction(link: Path, target: Path):
-    """A directory junction (no administrator rights needed)."""
+def junction(link: Path, target: Path, required: bool = True) -> bool:
+    """A directory junction (no administrator rights needed); a symbolic link where
+    mklink is missing or refuses (Wine/Proton). With required=False a failure is a
+    note, and False comes back."""
     if link.exists() or link.is_symlink():
-        return
+        return True
     link.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True)
-    if r.returncode != 0:
-        fail(f"Could not link {link} to {target}: {r.stdout.strip()} {r.stderr.strip()}")
+    why = ""
+    try:
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True)
+        if r.returncode == 0 and link.exists():
+            return True
+        why = f"{r.stdout.strip()} {r.stderr.strip()}".strip()
+    except OSError as e:
+        why = str(e)
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        if link.exists():
+            return True
+    except OSError as e:
+        why = f"{why} / {e}".strip(" /")
+    if required:
+        fail(f"Could not link {link} to {target}: {why}")
+    say("note", f"Could not link {link} to {target} ({why}).")
+    return False
 
 
 def assets_folder(path: Path):
@@ -223,7 +240,8 @@ def step_runtime(root: Path):
     link = Path(root.anchor) / "data"
     target = data / "android" / "data"
     if not link.exists():
-        junction(link, target)
+        if not junction(link, target, required=False):
+            say("note", "The game's videos may not play; everything else works.")
     elif os.path.realpath(link) != os.path.realpath(target):
         say("note", f"{link} already exists and is not the port's: the game's videos may not play")
 
