@@ -67,13 +67,29 @@ type Holder struct {
 
 func NewHolder(binPath string) (*Holder, error) {
 	h := &Holder{binPath: binPath}
-	if err := h.Reload(); err != nil {
+	// PC port: a plain start leaves the file's time alone. Touching it here gave
+	// the client a new version on every start, so it fetched and kept another
+	// 7.7 MB copy each session. A file that really changed (the launcher's patch,
+	// Pod Programs, a new calendar loop) already has a new time.
+	if err := h.load(); err != nil {
 		return nil, err
 	}
 	return h, nil
 }
 
+// Reload loads the master data again and moves its time on, so clients fetch it.
 func (h *Holder) Reload() error {
+	if err := h.load(); err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := os.Chtimes(h.binPath, now, now); err != nil {
+		log.Printf("[runtime] os.Chtimes(%s) failed (clients may not invalidate cache): %v", h.binPath, err)
+	}
+	return nil
+}
+
+func (h *Holder) load() error {
 	if err := memorydb.Init(h.binPath); err != nil {
 		return fmt.Errorf("memorydb.Init: %w", err)
 	}
@@ -91,10 +107,6 @@ func (h *Holder) Reload() error {
 		questIds = append(questIds, id)
 	}
 	store.SetQuestCopies(questIds)
-	now := time.Now()
-	if err := os.Chtimes(h.binPath, now, now); err != nil {
-		log.Printf("[runtime] os.Chtimes(%s) failed (clients may not invalidate cache): %v", h.binPath, err)
-	}
 	return nil
 }
 
