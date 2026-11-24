@@ -26,7 +26,7 @@ locally, the fan-made server that brought the game back. Nothing leaves your PC.
 
 ## Download
 
-Grab `NieR-Reincarnation-PC-v1.3.zip` from [Releases](../../releases). Already playing an older version?
+Grab `NieR-Reincarnation-PC-v1.3.1.zip` from [Releases](../../releases). Already playing an older version?
 Unzip it over your game folder, your saves and settings stay.
 
 Got a save on your phone (Bunker)? Export it there, then Settings › Saves › **Import from phone**.
