@@ -3,6 +3,8 @@
 NieR Re[in]carnation died on April 29, 2024. This brings it back, running natively on Windows: your
 own copy, no emulator, no internet, no phone.
 
+Runs up to 4K and 120 fps (or unlimited if your PC can take it), way past anything a phone ever pushed.
+
 Fan project, not affiliated with SQUARE ENIX or Applibot, and **the game isn't in here**. You bring
 your own files and the launcher turns them into a PC install. (Legal stuff: [NOTICE.md](NOTICE.md).)
 
@@ -24,7 +26,7 @@ locally, the fan-made server that brought the game back. Nothing leaves your PC.
 
 ## Download
 
-Grab `NieR-Reincarnation-PC-v1.2.zip` from [Releases](../../releases). Already playing an older version?
+Grab `NieR-Reincarnation-PC-v1.3.zip` from [Releases](../../releases). Already playing an older version?
 Unzip it over your game folder, your saves and settings stay.
 
 Got a save on your phone (Bunker)? Export it there, then Settings › Saves › **Import from phone**.
@@ -45,6 +47,19 @@ Plus three game files:
 The asset dump and master data are on the [Lunar Tear](https://github.com/Walter-Sparrow/lunar-tear)
 Discord: https://discord.gg/MZAf5aVkJG. The APK? Google it, it's out there.
 
+> [!IMPORTANT]
+> ## That Discord is Lunar Tear's, not this port's
+> It's the [Lunar Tear](https://github.com/Walter-Sparrow/lunar-tear) project's server, linked here
+> to give them credit: without their server the game wouldn't run at all, and neither would this port.
+>
+> **Please don't ask anything about this port over there.** Their support is for the server only and
+> has nothing to do with this project, so don't bug them. Got a problem with the port? Open an
+> [issue](../../issues) here.
+>
+> Wanna support the project? Go support [Lunar Tear](https://github.com/Walter-Sparrow/lunar-tear)
+> directly. They're the ones who deserve it: every fan port of this game, on every platform, only
+> exists because of their work and their server.
+
 Don't post any of these files in issues, please.
 
 ## Setup
@@ -52,8 +67,13 @@ Don't post any of these files in issues, please.
 Unzip it anywhere, run `NieR.exe`, feed it the three files. First run unpacks ~21 GB and patches
 everything, so go grab a coffee. You only do this once, and your original files aren't touched.
 
-Hit **START**. The first session or two will feel a bit sluggish while the game's code gets translated
-in the background (~15 min). After that you're good.
+Hit **START**.
+
+> [!WARNING]
+> ## Your first session or two WILL lag
+> For roughly the first 15 minutes the game stutters and feels slow. That's normal: its code is
+> getting translated to native PC code in the background. Just keep playing, it smooths out by
+> itself and stays that way.
 
 ## The launcher
 
