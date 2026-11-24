@@ -22985,7 +22985,7 @@ index 76ac4ea..55e9b7c 100644
      WINAPK_SHIM("eventfd", g_eventfd),
      WINAPK_SHIM("eventfd_read", g_eventfd_read),
 diff --git a/windows/src/bionic/misc.cpp b/windows/src/bionic/misc.cpp
-index 37dbe61..87c13a7 100644
+index 37dbe61..8e19d56 100644
 --- a/windows/src/bionic/misc.cpp
 +++ b/windows/src/bionic/misc.cpp
 @@ -122,7 +122,7 @@ void sleep_ns(int64_t ns) {
@@ -23061,7 +23061,22 @@ index 37dbe61..87c13a7 100644
      return -1;
  }
  WINAPK_GUEST_ABI int g_madvise(void* addr, size_t len, int advice) {
-@@ -639,15 +674,24 @@ int64_t guest_futex(uint32_t* uaddr, int op, uint32_t val, const GuestTimespec*
+@@ -561,7 +596,13 @@ WINAPK_GUEST_ABI glong g_sysconf(int name) {
+     GetSystemInfo(&si);
+     switch (name) {
+         case 0x27: return 4096;                                // _SC_PAGESIZE
+-        case 0x60: case 0x61: return si.dwNumberOfProcessors;  // _SC_NPROCESSORS_CONF/ONLN
++        case 0x60: case 0x61: {  // _SC_NPROCESSORS_CONF/ONLN; WINAPK_NPROC overrides (diagnostic)
++            static const glong forced = [] {
++                const char* e = std::getenv("WINAPK_NPROC");
++                return e ? static_cast<glong>(std::atol(e)) : glong{0};
++            }();
++            return forced > 0 ? forced : static_cast<glong>(si.dwNumberOfProcessors);
++        }
+         case 0x6: return 100;                                  // _SC_CLK_TCK
+         case 0x5: return 8192;                                 // _SC_OPEN_MAX
+         case 0x62: case 0x63: {                                // _SC_PHYS_PAGES, _SC_AVPHYS_PAGES
+@@ -639,15 +680,24 @@ int64_t guest_futex(uint32_t* uaddr, int op, uint32_t val, const GuestTimespec*
              }
              ms = ns <= 0 ? 0 : static_cast<DWORD>((ns + 999999) / 1000000);
          }
@@ -23588,7 +23603,7 @@ index 480cf1f..0a13c53 100644
  
  }  // namespace winapk
 diff --git a/windows/src/bionic/stdio.cpp b/windows/src/bionic/stdio.cpp
-index 7241c7d..ea599c1 100644
+index 7241c7d..9cc3899 100644
 --- a/windows/src/bionic/stdio.cpp
 +++ b/windows/src/bionic/stdio.cpp
 @@ -11,6 +11,9 @@
@@ -23777,6 +23792,55 @@ index 7241c7d..ea599c1 100644
  WINAPK_GUEST_ABI int g_fstat(int fd, GuestStat* g) {
      if (auto o = fd_object(fd)) {
          std::memset(g, 0, sizeof(*g));
+@@ -1054,14 +1215,28 @@ WINAPK_GUEST_ABI int g_fclose(void* f) {
+     if (is_funopen && fun.closefn) fun.closefn(fun.cookie);
+     return rc;
+ }
+-WINAPK_GUEST_ABI size_t g_fread(void* buf, size_t sz, size_t n, void* f) { return std::fread(buf, sz, n, host_file(f)); }
++// A guest that reads a stream it never got (fopen failed and it did not check:
++// Seeker's root probe under Wine) gets EBADF, as Bionic's checks would give,
++// instead of the CRT taking the process down on a null FILE.
++bool null_stream(void* f) {
++    if (f) return false;
++    *guest_errno() = kEBADF;
++    return true;
++}
++WINAPK_GUEST_ABI size_t g_fread(void* buf, size_t sz, size_t n, void* f) {
++    if (null_stream(f)) return 0;
++    return std::fread(buf, sz, n, host_file(f));
++}
+ WINAPK_GUEST_ABI size_t g_fwrite(const void* buf, size_t sz, size_t n, void* f) {
+     return std::fwrite(buf, sz, n, host_file(f));
+ }
+ WINAPK_GUEST_ABI int g_fputs(const char* s, void* f) { return std::fputs(s, host_file(f)); }
+ WINAPK_GUEST_ABI int g_fputc(int c, void* f) { return std::fputc(c, host_file(f)); }
+ WINAPK_GUEST_ABI int g_putchar(int c) { return std::fputc(c, stdout); }
+-WINAPK_GUEST_ABI char* g_fgets(char* s, int n, void* f) { return std::fgets(s, n, host_file(f)); }
++WINAPK_GUEST_ABI char* g_fgets(char* s, int n, void* f) {
++    if (null_stream(f)) return nullptr;
++    return std::fgets(s, n, host_file(f));
++}
+ WINAPK_GUEST_ABI char* g_fgets_chk(char* s, int n, void* f, size_t bn) {
+     if (n < 0 || static_cast<size_t>(n) > bn) {
+         std::fprintf(stderr, "[win.apk] guest FORTIFY: fgets: prevented buffer overflow\n");
+@@ -1085,14 +1260,14 @@ WINAPK_GUEST_ABI size_t g_fwrite_chk(const void* buf, size_t sz, size_t n, void*
+     }
+     return g_fwrite(buf, sz, n, f);
+ }
+-WINAPK_GUEST_ABI int g_fgetc(void* f) { return std::fgetc(host_file(f)); }
++WINAPK_GUEST_ABI int g_fgetc(void* f) { return null_stream(f) ? EOF : std::fgetc(host_file(f)); }
+ WINAPK_GUEST_ABI int g_ungetc(int c, void* f) { return std::ungetc(c, host_file(f)); }
+ WINAPK_GUEST_ABI int g_fflush(void* f) { return std::fflush(f ? host_file(f) : nullptr); }
+ WINAPK_GUEST_ABI int g_fseek(void* f, glong off, int whence) { return _fseeki64(host_file(f), off, whence) ? fail_crt() : 0; }
+ WINAPK_GUEST_ABI glong g_ftell(void* f) { return _ftelli64(host_file(f)); }
+ WINAPK_GUEST_ABI void g_rewind(void* f) { std::rewind(host_file(f)); }
+-WINAPK_GUEST_ABI int g_feof(void* f) { return std::feof(host_file(f)); }
+-WINAPK_GUEST_ABI int g_ferror(void* f) { return std::ferror(host_file(f)); }
++WINAPK_GUEST_ABI int g_feof(void* f) { return null_stream(f) ? 1 : std::feof(host_file(f)); }
++WINAPK_GUEST_ABI int g_ferror(void* f) { return null_stream(f) ? 1 : std::ferror(host_file(f)); }
+ WINAPK_GUEST_ABI void g_clearerr(void* f) { std::clearerr(host_file(f)); }
+ WINAPK_GUEST_ABI int g_fileno(void* f) { return _fileno(host_file(f)); }
+ WINAPK_GUEST_ABI int g_setvbuf(void* f, char* buf, int mode, size_t n) {
 diff --git a/windows/src/guest_jni.cpp b/windows/src/guest_jni.cpp
 index 6b8bf56..dcbaacf 100644
 --- a/windows/src/guest_jni.cpp
