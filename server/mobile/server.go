@@ -18,6 +18,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"lunar-tear/server/internal/auth"
@@ -163,6 +164,9 @@ func Start(dataRoot, assetRoot string) (err error) {
 		l, e := listen(addr)
 		if e != nil {
 			return e
+		}
+		if addr == local(8003) {
+			l = &loggedListener{Listener: l, name: "game"}
 		}
 		s.listeners = append(s.listeners, l)
 	}
@@ -418,3 +422,23 @@ func PrepareBackup(root string) string {
 // call, so it signs in again and loads a change made beside it (its save, the
 // master data, the calendar). See interceptor.ReturnToTitle.
 func RequestTitle() { interceptor.RequestTitle() }
+
+// loggedListener logs the first connections the game makes to a port: a
+// game that never gets past its title shows here whether its connections
+// reach the server at all (a firewall, an antivirus or a proxy in between
+// leaves this empty while the assets port works).
+type loggedListener struct {
+	net.Listener
+	name string
+	n    int32
+}
+
+func (l *loggedListener) Accept() (net.Conn, error) {
+	c, e := l.Listener.Accept()
+	if e == nil {
+		if n := atomic.AddInt32(&l.n, 1); n <= 20 {
+			log.Printf("[Net] %s port: connection #%d from %s", l.name, n, c.RemoteAddr())
+		}
+	}
+	return c, e
+}
