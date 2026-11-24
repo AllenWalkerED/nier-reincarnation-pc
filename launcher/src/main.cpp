@@ -26,6 +26,7 @@
 #include <tlhelp32.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #include <atomic>
 #include <cstdio>
@@ -241,6 +242,39 @@ bool port_open(int port) {
     return ok;
 }
 
+// Who listens on 127.0.0.1:port (or on every address), from Windows' TCP table:
+// "<program>.exe (PID n)", or "" when nobody does. The game is built for its
+// three ports, so a program on one of them (Razer Synapse's service, for one,
+// on 8080) keeps the server from starting.
+std::wstring port_owner(int port) {
+    ULONG size = 0;
+    GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    std::vector<unsigned char> buf(size + 4096);
+    size = static_cast<ULONG>(buf.size());
+    if (GetExtendedTcpTable(buf.data(), &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) != NO_ERROR) return {};
+    const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(buf.data());
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_TCPROW_OWNER_PID& row = table->table[i];
+        if (ntohs(static_cast<u_short>(row.dwLocalPort)) != port) continue;
+        const DWORD addr = ntohl(row.dwLocalAddr);
+        if (addr != INADDR_LOOPBACK && addr != INADDR_ANY) continue;
+        std::wstring name = L"another program";
+        if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.dwOwningPid)) {
+            wchar_t full[MAX_PATH * 2];
+            DWORD n = MAX_PATH * 2;
+            if (QueryFullProcessImageNameW(p, 0, full, &n)) {
+                name.assign(full, n);
+                name = name.substr(name.find_last_of(L"\\/") + 1);
+            }
+            CloseHandle(p);
+        } else if (row.dwOwningPid == 4) {
+            name = L"Windows (System)";
+        }
+        return name + L" (PID " + std::to_wstring(row.dwOwningPid) + L")";
+    }
+    return {};
+}
+
 // Our environment with the settings' variables set (a Unicode block).
 std::wstring environment_with(const std::vector<std::pair<std::wstring, std::wstring>>& vars) {
     std::vector<std::wstring> entries;
@@ -308,6 +342,19 @@ void run_game(Launch l) {
     status("Stopping old servers...");
     for (const wchar_t* name : {L"nier-server.exe", L"auth-server.exe", L"octo-cdn.exe", L"lunar-tear.exe"})
         kill_by_path(bin + L"\\" + name);
+
+    // The game's ports must be free: name what holds one, instead of a server
+    // that cannot start and a game that never gets past its title.
+    for (int port : {8003, 8080, 3000}) {
+        std::wstring owner;
+        for (int i = 0; i < 20 && !(owner = port_owner(port)).empty(); ++i) Sleep(100);  // our old server going away
+        if (!owner.empty()) {
+            to_page(L"error:Port " + std::to_wstring(port) + L" is in use by " + owner +
+                    L". The game needs it: close that program (or stop its service) and press START again.");
+            g_busy = false;
+            return;
+        }
+    }
 
     // The accounts' key stays the same between runs (save\auth.secret;
     // nier-server copies it to auth.key, the name the server reads).
