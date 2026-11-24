@@ -86,6 +86,8 @@ people have put long sessions into it.
 
 * **Black 3D or weird graphics:** switch the renderer in Settings › Display (Direct3D 11 is the default,
   try Vulkan).
+* **"Port 8080 is in use by ...":** some other app grabbed a port the game needs (Razer Synapse loves
+  8080). Close that app or stop its service, then hit START again.
 * **Slow at first:** that's the background translation, give it a session or two.
 * **SmartScreen / antivirus yelling at you:** the exes aren't signed. Everything's built from the source
   right here.

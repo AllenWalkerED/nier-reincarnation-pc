@@ -412,7 +412,7 @@ function autoForGpu(info) {
 }
 
 // ---- updates: the newest release on GitHub --------------------------------------------
-const VERSION = "1.2";
+const VERSION = "1.3";
 const LATEST = "https://api.github.com/repos/AllenWalkerED/nier-reincarnation-pc/releases/latest";
 const newer = (a, b) => {  // is version a newer than b ("1.10" > "1.9")
   const x = a.split(".").map(Number), y = b.split(".").map(Number);
