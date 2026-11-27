@@ -2411,10 +2411,10 @@ index 846e775..4f6cae4 100644
  }  // namespace winapk::host
 diff --git a/windows/host/game_effects.cpp b/windows/host/game_effects.cpp
 new file mode 100644
-index 0000000..a01b15b
+index 0000000..b5f938a
 --- /dev/null
 +++ b/windows/host/game_effects.cpp
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,517 @@
 +// game_effects.cpp -- WINAPK_GAME_EFFECTS_OFF: the game's own graphics effects
 +// turned off one by one (NieR Re[in]carnation 3.7.1; Bunker's render_effects.c
 +// for Android, run here from the host).
@@ -2470,12 +2470,11 @@ index 0000000..a01b15b
 +#endif
 +#include <windows.h>
 +
++#include "native_window.h"
 +#include "winapk/arm64_guest.h"
 +#include "winapk/linker.h"
 +
 +namespace winapk::host {
-+
-+int render_scale_percent();  // native_window.cpp: WINAPK_RENDER_SCALE, 0 when unset
 +
 +namespace {
 +
@@ -2700,7 +2699,7 @@ index 0000000..a01b15b
 +    // WINAPK_RENDER_SCALE (the launcher's Render resolution): every preset's
 +    // RenderTargetSize becomes DeviceMax (8), the surface the runtime gives
 +    // the app (the window at that percentage). The presets ask for fixed sizes
-+    // (HD 1152x720 for High and the start, FullHD for Highest, 540 lines
++    // (HD 1152x720 for High, FullHD for Highest, 540 lines
 +    // below): Unity then drew that small picture in the corner of the larger
 +    // surface, and the render scale had nothing to scale.
 +    if (render_scale_percent() > 0) {
@@ -16918,10 +16917,17 @@ index b9bced6..1b71a52 100644
      return g_window.buf_w > 0 && g_window.buf_h > 0;
  }
 diff --git a/windows/host/native_window.h b/windows/host/native_window.h
-index b44e4da..d40810e 100644
+index b44e4da..a807f08 100644
 --- a/windows/host/native_window.h
 +++ b/windows/host/native_window.h
-@@ -29,6 +29,12 @@ bool native_window_has_geometry();
+@@ -24,11 +24,19 @@ bool native_window_buffer_size(const void* window, int* w, int* h);
+ // with a size): its frames are then scaled to the window, as Android's
+ // compositor scales such a buffer; otherwise they are the window's size.
+ bool native_window_has_geometry();
++// The explicit render scale (25..100), or 0 for the game's own resolution.
++int render_scale_percent();
+
+ // A frame from the app's native code for the window, 0xAARRGGBB rows, top row
  // first. Any thread (native_cocoa.cpp).
  void guest_frame_present(const uint32_t* argb, int w, int h);
  
@@ -17941,10 +17947,26 @@ index 0000000..482f56d
 +
 +}  // namespace winapk::host::perf
 diff --git a/windows/host/runtime_main.cpp b/windows/host/runtime_main.cpp
-index 93b72ed..fb02705 100644
+index 93b72ed..dd87351 100644
 --- a/windows/host/runtime_main.cpp
 +++ b/windows/host/runtime_main.cpp
-@@ -120,12 +120,14 @@ bool google_services_setting() {
+@@ -53,6 +53,7 @@
+ #include "crash_report.h"
+ #include "guest_libs.h"
+ #include "host_natives.h"
++#include "native_window.h"
+ #include "user_folders.h"
+ #include "win32_window.h"
+
+@@ -65,6 +66,7 @@
+ #include <ctime>
+ #include <cwctype>
+ #include <filesystem>
++#include <fstream>
+ #include <string>
+ #include <thread>
+ #include <vector>
+@@ -120,12 +122,14 @@ bool google_services_setting() {
             value != 0;
  }
  
@@ -17961,7 +17983,54 @@ index 93b72ed..fb02705 100644
  // `w` in the process's ANSI code page, when every character of it survives
  // the round trip. Under the manifest's UTF-8 code page that is always so.
  bool to_ansi(const std::wstring& w, std::string* out) {
-@@ -721,7 +723,22 @@ bool aot_background_on() {
+@@ -699,6 +703,46 @@ std::wstring aot_sysroot(const fs::path& clang) {
+
+ fs::path arm64_libs(const fs::path& base) { return base.parent_path() / "lib" / "arm64"; }
+
++// Global 3.7.1-152: RenderManager.DelayStart requests HD directly, after
++// the preset override. Set its argument to DeviceMax for an explicit render
++// scale and restore HD when returning to Game default.
++// https://github.com/AllenWalkerED/nier-reincarnation-pc/issues/2#issuecomment-7123891058
++void set_nier_startup_resolution(const Options& o) {
++    const auto package = o.apk.parent_path().filename().wstring();
++    if (o.install_only || package.rfind(L"com.square_enix.android_googleplay.nierspww-", 0) != 0) return;
++
++    constexpr std::streamoff library_size = 127359872;
++    constexpr std::streamoff offset = 0x2EC1D04;
++    constexpr uint32_t hd = 0x528000a1;         // mov w1, #5
++    constexpr uint32_t device_max = 0x52800101; // mov w1, #8
++    const bool scaled = winapk::host::render_scale_percent() > 0;
++    const uint32_t target = scaled ? device_max : hd;
++    const fs::path so = arm64_libs(o.apk) / "libil2cpp.so";
++    std::ifstream input(so, std::ios::binary | std::ios::ate);
++    if (!input || input.tellg() != library_size) return;
++
++    uint32_t word;
++    if (!input.seekg(offset).read(reinterpret_cast<char*>(&word), sizeof word) ||
++        (word != hd && word != device_max) || word == target) return;
++    input.close();
++
++    // Publish the whole library before the loader or AOT can use it. The
++    // AOT loader checks the code hash before accepting any old translation.
++    const fs::path tmp = winapk::arm64::aot_temp_name(so);
++    std::error_code ec;
++    if (fs::copy_file(so, tmp, ec)) {
++        std::fstream output(tmp, std::ios::binary | std::ios::in | std::ios::out);
++        output.seekp(offset).write(reinterpret_cast<const char*>(&target), sizeof target);
++        output.close();
++        if (output && winapk::arm64::aot_replace(tmp, so)) {
++            std::fprintf(stderr, "[win.apk] title render size: %s\n", scaled ? "DeviceMax" : "HD (Game default)");
++            return;
++        }
++        fs::remove(tmp, ec);
++    }
++    std::fprintf(stderr, "[win.apk] could not set the title render size\n");
++}
++
+ fs::path with_suffix(const fs::path& so, const wchar_t* suffix) { return so.wstring() + suffix; }
+
+ // WINAPK_AOT_FULL_BELOW=<n> replaces kAotFullBelow (the worker's test makes
+@@ -721,7 +765,22 @@ bool aot_background_on() {
  }
  
  // Where a pass over `so` keeps its work until it is done.
@@ -17985,7 +18054,7 @@ index 93b72ed..fb02705 100644
  
  int64_t unix_now() { return static_cast<int64_t>(std::time(nullptr)); }
  
-@@ -753,18 +770,37 @@ std::string hex64(uint64_t v) {
+@@ -753,18 +812,37 @@ std::string hex64(uint64_t v) {
      return out;
  }
  
@@ -18028,7 +18097,7 @@ index 93b72ed..fb02705 100644
  
  struct AotStamp {
      std::string kind;  // "full", "profile", "wait", "skip", "bad", "written", or "" (none)
-@@ -774,6 +810,7 @@ struct AotStamp {
+@@ -774,6 +852,7 @@ struct AotStamp {
      int64_t retry_after = 0;  // and when to try again (Unix seconds)
      uint64_t cpu = 0;         // aot_cpu_signature() of the CPU it was compiled for; 0 before stamps had one
      uint64_t lib = 0;         // aot_lib_id() of the library it is about; 0 before stamps had one (and DLLs a seal)
@@ -18036,7 +18105,7 @@ index 93b72ed..fb02705 100644
  };
  
  AotStamp read_aot_stamp(const fs::path& so) {
-@@ -783,9 +820,10 @@ AotStamp read_aot_stamp(const fs::path& so) {
+@@ -783,9 +862,10 @@ AotStamp read_aot_stamp(const fs::path& so) {
      unsigned long long lines = 0;
      unsigned version = 0, failures = 0;
      long long retry_after = 0;
@@ -18050,7 +18119,7 @@ index 93b72ed..fb02705 100644
          s.kind = kind;
          s.lines = static_cast<size_t>(lines);
          s.version = version;
-@@ -801,13 +839,14 @@ AotStamp read_aot_stamp(const fs::path& so) {
+@@ -801,13 +881,14 @@ AotStamp read_aot_stamp(const fs::path& so) {
  // read it while the worker writes it, and a worker killed half way through
  // once left half a stamp.
  void write_aot_stamp(const fs::path& so, const char* kind, size_t lines, unsigned failures = 0,
@@ -18069,7 +18138,7 @@ index 93b72ed..fb02705 100644
      if (!winapk::arm64::aot_write_file(with_suffix(so, L".aot.stamp"), line)) {
          std::fprintf(stderr, "[win.apk] %s: cannot write its stamp (error %lu)\n",
                       utf8(so.filename().wstring()).c_str(), GetLastError());
-@@ -851,12 +890,19 @@ bool aot_needs_work(const fs::path& so) {
+@@ -851,12 +932,19 @@ bool aot_needs_work(const fs::path& so) {
          return stamp.failures < kAotMaxFailures && unix_now() >= stamp.retry_after;
      }
      if (fs::exists(aot_work_dir(so) / "plan", ec)) return true;  // a pass to finish
@@ -18092,7 +18161,7 @@ index 93b72ed..fb02705 100644
      // From a profile: not again within kAotMinIntervalS (the stamp's retry
      // field), however fast the profile grows in an app's first sessions.
      if (stamp.kind == "profile" && unix_now() < stamp.retry_after) return false;
-@@ -889,6 +935,23 @@ void background_child(HANDLE process) {
+@@ -889,6 +977,23 @@ void background_child(HANDLE process) {
      SetProcessInformation(process, ProcessMemoryPriority, &memory, sizeof memory);
  }
  
@@ -18116,7 +18185,7 @@ index 93b72ed..fb02705 100644
  // How many compilers may run at once, decided again each time one is about
  // to start (see the top of this section for the policy).
  class AotGovernor {
-@@ -925,9 +988,18 @@ public:
+@@ -925,9 +1030,18 @@ public:
                  why = "free memory";
              }
          }
@@ -18136,7 +18205,7 @@ index 93b72ed..fb02705 100644
              n = 1;
              why = "the user is active";
          }
-@@ -941,7 +1013,7 @@ public:
+@@ -941,7 +1055,7 @@ public:
              why = "battery saver is on";
          }
          QUERY_USER_NOTIFICATION_STATE state;
@@ -18145,7 +18214,7 @@ index 93b72ed..fb02705 100644
              (state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE)) {
              n = 0;
              why = "a full-screen program runs";
-@@ -1117,7 +1189,11 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
+@@ -1117,7 +1231,11 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
      const fs::path cached = cache.empty() ? fs::path() : cache / (key + ".aot.dll");
      const fs::path dll = work / (so.filename().wstring() + L".aot.dll");
      // aot_cache_take checks the entry whole and drops a broken one.
@@ -18158,7 +18227,7 @@ index 93b72ed..fb02705 100644
          write_aot_stamp(so, "full", profile_lines(so));
          fs::remove_all(work, ec);
          std::fprintf(stderr, "[win.apk] %s: translation taken from the shared cache\n", name.c_str());
-@@ -1146,7 +1222,8 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
+@@ -1146,7 +1264,8 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
      for (const auto& e : fs::directory_iterator(work, ec)) {  // what a stopped compile left
          if (e.path().extension() == L".tmp") fs::remove(e.path(), ec);
      }
@@ -18168,7 +18237,7 @@ index 93b72ed..fb02705 100644
      const fs::path c = work / (so.filename().wstring() + L".c");
      const int rc = run_process(quoted(exe_dir() / "winapk-aot.exe") + L" " + quoted(so) + L" " + quoted(c) +
                                 L" --part-insns " + std::to_wstring(kAotPartInsns) + L" --profile " + quoted(profile) +
-@@ -1235,7 +1312,8 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
+@@ -1235,7 +1354,8 @@ void aot_translate_one(const fs::path& so, const fs::path& clang, const fs::path
          return;
      }
      fs::remove_all(work, ec);
@@ -18178,7 +18247,7 @@ index 93b72ed..fb02705 100644
      std::fprintf(stderr, "[win.apk] %s: translated%s in %.1f s\n", name.c_str(), rc == 4 ? " (what ran)" : "",
                   static_cast<double>(GetTickCount64() - t0) / 1000);
  }
-@@ -1305,7 +1383,7 @@ int aot_translate_main(const fs::path& libs, const fs::path& cache, DWORD delay_
+@@ -1305,7 +1425,7 @@ int aot_translate_main(const fs::path& libs, const fs::path& cache, DWORD delay_
      if (!cache.empty()) winapk::arm64::aot_cache_trim(cache, kAotCacheBytes, kAotCacheDays);
      winapk::arm64::aot_remove_stale_temps(libs);  // stamps a killed worker or app was writing
      std::error_code ec;
@@ -18187,7 +18256,7 @@ index 93b72ed..fb02705 100644
          if (!e.is_directory(ec)) fs::remove(e.path(), ec);  // from before passes had a folder each
      }
      for (int pass = 0; pass < 8; ++pass) {
-@@ -1350,7 +1428,7 @@ void start_aot_worker(const fs::path& libs, const fs::path& log, const fs::path&
+@@ -1350,7 +1470,7 @@ void start_aot_worker(const fs::path& libs, const fs::path& log, const fs::path&
          UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &out, sizeof out, nullptr, nullptr)) {
          si.lpAttributeList = list;
      }
@@ -18196,6 +18265,14 @@ index 93b72ed..fb02705 100644
                         quoted(cache);
      if (delay_s > 0) cmd += L" --delay " + std::to_wstring(delay_s);
      const DWORD flags =
+@@ -2209,6 +2329,7 @@ int wmain(int argc, wchar_t** argv) {
+     // value inherited from the process that started this one (the broker
+     // starting Play services for an app) names another app.
+     SetEnvironmentVariableW(L"MACAPK_APK_PATH", b.options.apk.c_str());
++    set_nier_startup_resolution(b.options);
+     prepare_arm64(b.options, b.app_dir);
+     if (!convert_dex(b.options, b.app_dir, &b.app_jar)) return 1;
+
 diff --git a/windows/host/win32_window.cpp b/windows/host/win32_window.cpp
 index 4bb79b9..0bcf892 100644
 --- a/windows/host/win32_window.cpp
